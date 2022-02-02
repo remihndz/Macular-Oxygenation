@@ -1,0 +1,3 @@
+# Boundary conditions value
+80.0				# Bruch's membrane PO2 (Dirichlet condition)
+20.0				# Vitreous PO2 (Dirichlet condition)

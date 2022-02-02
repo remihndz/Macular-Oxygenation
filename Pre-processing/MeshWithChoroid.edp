@@ -1,0 +1,172 @@
+// Creates the mesh of the retina for the codes in src/RetinalPO2_NoChoroid.edp
+
+load "iovtk"
+
+int n = 100;                                 // Control on the number of elements on the borders
+int choroid = 0, lateral = 1, vitreous = 2, inner = 3, bruchs = 4; // Borders' label
+int RPE = 0, PH = 1, ONL = 2, OPL = 3, INL = 4, IPL = 5, GCL = 6, CC = 7;  // Layers' label
+
+func ifstream skipcomment(ifstream &ff)
+{
+  while(1)
+    {
+      int where = ff.tellg(); // store file position
+      string comment;
+      ff >> comment;
+      if ( ! ff.good() ) break;
+      if( comment(0:0)=="#") {
+	getline(ff,comment);
+	// cout << " -- #" << comment << endl;
+      }
+      else {
+	ff.seekg(where); // restore file position
+	break;
+      }
+    }
+  return ff;
+}
+
+string ParameterFile = "../Params/Dimensions.dat";
+
+// Layers dimension
+real TRPEfov, TRPEpara, TPHfov, TPHpara, TONLfov, TONLpara, TOPLfov, TOPLpara, TINLfov, TINLpara, TIPLfov, TIPLpara, TGCLfov, TGCLpara, TCC;
+// Vascular beds' dimensions
+real TSCPfovea, TSCPpara, TICPfovea, TICPpara, TDCPfovea, TDCPpara;
+// Computational domain's dimensions 
+real wret, wmid, wtran, wfovea;
+
+{
+  ifstream ff(ParameterFile);
+  skipcomment(ff);
+  ff >> TRPEpara;
+  skipcomment(ff);
+  ff >> TPHpara;
+  skipcomment(ff);
+  ff >> TONLpara;
+  skipcomment(ff);
+  ff >> TOPLpara;
+  skipcomment(ff);
+  ff >> TINLpara;
+  skipcomment(ff);
+  ff >> TIPLpara;
+  skipcomment(ff);
+  ff >> TGCLpara;
+
+  skipcomment(ff);
+  ff >> TRPEfov;
+  skipcomment(ff);
+  ff >> TPHfov;
+  skipcomment(ff);
+  ff >> TONLfov;
+  skipcomment(ff);
+  ff >> TOPLfov;
+  skipcomment(ff);
+  ff >> TINLfov;
+  skipcomment(ff);
+  ff >> TIPLfov;
+  skipcomment(ff);
+  ff >> TGCLfov;
+
+  skipcomment(ff);
+  ff >> TSCPpara;
+  skipcomment(ff);
+  ff >> TICPpara;
+  skipcomment(ff);
+  ff >> TDCPpara;
+
+  skipcomment(ff);
+  ff >> TSCPfovea;
+  skipcomment(ff);
+  ff >> TICPfovea;
+  skipcomment(ff);
+  ff >> TDCPfovea;
+
+  skipcomment(ff);
+  ff >> wret;
+  wmid = wret/2.0;		// The domain is symmetrical.
+  skipcomment(ff);
+  ff >> wtran;
+  skipcomment(ff);
+  ff >> wfovea;
+
+  skipcomment(ff);
+  ff >> TCC;
+}
+
+// Construction of the mesh
+real ypara = 0.0, yfove = 0.0;              // Current layer's height
+
+real yRPE = TRPEpara;
+real yPHpara  = yRPE + TPHpara, yPHfovea = yRPE + TPHfov;
+real yONLpara = yPHpara + TONLpara, yONLfovea = yPHfovea + TONLfov;
+real yOPLpara = yONLpara + TOPLpara, yOPLfovea = yONLfovea + TOPLfov;
+real yINLpara = yOPLpara + TINLpara, yINLfovea = yOPLfovea + TINLfov;
+real yIPLpara = yINLpara + TIPLpara, yIPLfovea = yINLfovea + TIPLfov;
+real yGCLpara = yIPLpara + TGCLpara, yGCLfovea = yIPLfovea + TGCLfov;
+
+// Choriocapillaris
+border leftCC(t=0,1)  {x = 0; y = TCC*(t-1); label=lateral;}
+border rightCC(t=0,1) {x = wmid; y = TCC*(t-1); label=lateral;}
+border bottomCC(t=0,1){x = t*wmid; y = -TCC; label=choroid;}
+
+// RPE - Bruch's membrane
+border BM(t=0,1){x = t*wmid; y = 0; label=bruchs;}
+border leftRPE(t=0,1){x=0; y=yRPE*t; label=lateral;}
+border rightRPE(t=0,1){x=wmid; y=yRPE*t; label=lateral;}
+border topRPE(t=0,1){x=t*wmid; y=yRPE; label=inner;}
+
+// Photoreceptor layer
+border leftPH(t=0,1){x=0; y=yRPE + t*TPHpara; label=lateral;}
+border rightPH(t=0,1){x=wmid; y=yRPE+t*TPHfov; label=lateral;}
+border topPHpara(t=0,1){x=t*wtran; y=yPHpara; label=inner;}
+border topPHtran(t=0,1){x=wtran + t*(wfovea-wtran); y=yPHpara + t*(yPHfovea-yPHpara); label=inner;}
+border topPHfove(t=0,1){x=wfovea + t*(wret/2.0-wfovea); y=yPHfovea; label=inner;}
+
+// Outer Nuclear Layer
+border leftONL(t=0,1) {x=0; y=yPHpara + t*TONLpara; label=lateral;}
+border rightONL(t=0,1){x=wmid; y=yPHfovea+ t*TONLfov;  label=lateral;}
+border topONLpara(t=0,1){x=t*wtran; y=yONLpara; label=inner;}
+border topONLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yONLpara+t*(yONLfovea-yONLpara); label=inner;}
+border topONLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yONLfovea; label=inner;}
+
+// Outer Plexiform Layer
+border leftOPL(t=0,1) {x=0; y=yONLpara + t*TOPLpara; label=lateral;}
+border rightOPL(t=0,1){x=wmid; y=yONLfovea+ t*TOPLfov;  label=lateral;}
+border topOPLpara(t=0,1){x=t*wtran; y=yOPLpara; label=inner;}
+border topOPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yOPLpara+t*(yOPLfovea-yOPLpara); label=inner;}
+border topOPLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yOPLfovea; label=inner;}
+
+// Inner Nuclear Layer
+border leftINL(t=0,1) {x=0; y=yOPLpara + t*TINLpara; label=lateral;}
+border rightINL(t=0,1){x=wmid; y=yOPLfovea+ t*TINLfov;  label=lateral;}
+border topINLpara(t=0,1){x=t*wtran; y=yINLpara; label=inner;}
+border topINLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yINLpara+t*(yINLfovea-yINLpara); label=inner;}
+border topINLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yINLfovea; label=inner;}
+
+// Inner Plexiform Layer
+border leftIPL(t=0,1) {x=0; y=yINLpara + t*TIPLpara; label=lateral;}
+border rightIPL(t=0,1){x=wmid; y=yINLfovea+ t*TIPLfov;  label=lateral;}
+border topIPLpara(t=0,1){x=t*wtran; y=yIPLpara; label=inner;}
+border topIPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yIPLpara+t*(yIPLfovea-yIPLpara); label=inner;}
+border topIPLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yIPLfovea; label=inner;}
+
+// Ganglion Cell Layer
+border leftGCL(t=0,1) {x=0; y=yIPLpara + t*TGCLpara; label=lateral;}
+border rightGCL(t=0,1){x=wmid; y=yIPLfovea+ t*TGCLfov;  label=lateral;}
+border vitr(t=0,1) {x=t*wmid; y = yGCLpara - (yGCLpara-yGCLfovea)*sin(pi*t/2.0); label=vitreous;}
+
+
+mesh Temp = buildmesh(BM(10*n) + leftCC(-n) + rightCC(n) + bottomCC(4*n)
+		      + topRPE(5*n) + leftRPE(-n) + rightRPE(n)
+		      + leftPH(-n) + rightPH(n) + topPHpara(n) + topPHtran(n) + topPHfove(n)
+		      + leftONL(-n) + rightONL(n) + topONLpara(n) + topONLtran(n) + topONLfove(n)
+		      + leftOPL(-n) + rightOPL(n) + topOPLpara(3*n) + topOPLtran(3*n) + topOPLfove(n)
+		      + leftINL(-4*n) + rightINL(4*n) + topINLpara(3*n) + topINLtran(3*n) + topINLfove(n)
+		      + leftIPL(-n) + rightIPL(n) + topIPLpara(n) + topIPLtran(n) + topIPLfove(n)
+		      + leftGCL(-n) + rightGCL(n) + vitr(-10*n));
+
+// Rearrange the labels for each layer
+int[int] Labels = [0, GCL, 6, IPL, 11, INL, 16, OPL, 21, ONL, 26, PH, 28, RPE, 31, CC];
+mesh Th = change(Temp, region=Labels);
+
+savemesh(Th, "WithChoroid.msh");
