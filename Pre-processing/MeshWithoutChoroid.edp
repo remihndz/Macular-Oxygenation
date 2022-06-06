@@ -30,28 +30,28 @@ func ifstream skipcomment(ifstream &ff)
 string DimensionsFile = RootParameters + "Dimensions.dat";
 
 // Layers dimension
-real TRPEfov, TRPEpara, TPHfov, TPHpara, TONLfov, TONLpara, TOPLfov, TOPLpara, TINLfov, TINLpara, TIPLfov, TIPLpara, TGCLfov, TGCLpara;
+real TRPEfov, TRPEperi, TPHfov, TPHperi, TONLfov, TONLperi, TOPLfov, TOPLperi, TINLfov, TINLperi, TIPLfov, TIPLperi, TGCLfov, TGCLperi;
 // Vascular beds' dimensions
-real TSCPfovea, TSCPpara, TICPfovea, TICPpara, TDCPfovea, TDCPpara;
+real TSCPfovea, TSCPperi, TICPfovea, TICPperi, TDCPfovea, TDCPperi;
 // Computational domain's dimensions 
 real wret, wmid, wtran, wfovea;
 
 {
   ifstream ff(DimensionsFile);
   skipcomment(ff);
-  ff >> TRPEpara;
+  ff >> TRPEperi;
   skipcomment(ff);
-  ff >> TPHpara;
+  ff >> TPHperi;
   skipcomment(ff);
-  ff >> TONLpara;
+  ff >> TONLperi;
   skipcomment(ff);
-  ff >> TOPLpara;
+  ff >> TOPLperi;
   skipcomment(ff);
-  ff >> TINLpara;
+  ff >> TINLperi;
   skipcomment(ff);
-  ff >> TIPLpara;
+  ff >> TIPLperi;
   skipcomment(ff);
-  ff >> TGCLpara;
+  ff >> TGCLperi;
 
   skipcomment(ff);
   ff >> TRPEfov;
@@ -69,11 +69,11 @@ real wret, wmid, wtran, wfovea;
   ff >> TGCLfov;
 
   skipcomment(ff);
-  ff >> TSCPpara;
+  ff >> TSCPperi;
   skipcomment(ff);
-  ff >> TICPpara;
+  ff >> TICPperi;
   skipcomment(ff);
-  ff >> TDCPpara;
+  ff >> TDCPperi;
 
   skipcomment(ff);
   ff >> TSCPfovea;
@@ -92,15 +92,15 @@ real wret, wmid, wtran, wfovea;
 }
 
 // Construction of the mesh
-real ypara = 0.0, yfove = 0.0;              // Current layer's height
+real yperi = 0.0, yfove = 0.0;              // Current layer's height
 
-real yRPE = TRPEpara;
-real yPHpara  = yRPE + TPHpara, yPHfovea = yRPE + TPHfov;
-real yONLpara = yPHpara + TONLpara, yONLfovea = yPHfovea + TONLfov;
-real yOPLpara = yONLpara + TOPLpara, yOPLfovea = yONLfovea + TOPLfov;
-real yINLpara = yOPLpara + TINLpara, yINLfovea = yOPLfovea + TINLfov;
-real yIPLpara = yINLpara + TIPLpara, yIPLfovea = yINLfovea + TIPLfov;
-real yGCLpara = yIPLpara + TGCLpara, yGCLfovea = yIPLfovea + TGCLfov;
+real yRPE = TRPEperi;
+real yPHperi  = yRPE + TPHperi, yPHfovea = yRPE + TPHfov;
+real yONLperi = yPHperi + TONLperi, yONLfovea = yPHfovea + TONLfov;
+real yOPLperi = yONLperi + TOPLperi, yOPLfovea = yONLfovea + TOPLfov;
+real yINLperi = yOPLperi + TINLperi, yINLfovea = yOPLfovea + TINLfov;
+real yIPLperi = yINLperi + TIPLperi, yIPLfovea = yINLfovea + TIPLfov;
+real yGCLperi = yIPLperi + TGCLperi, yGCLfovea = yIPLfovea + TGCLfov;
 
 // RPE - Bruch's membrane
 border BM(t=0,1){x = t*wmid; y = 0; label=choroid;}
@@ -109,57 +109,63 @@ border rightRPE(t=0,1){x=wmid; y=yRPE*t; label=lateral;}
 border topRPE(t=0,1){x=t*wmid; y=yRPE; label=inner;}
 
 // Photoreceptor layer
-border leftPH(t=0,1){x=0; y=yRPE + t*TPHpara; label=lateral;}
+border leftPH(t=0,1){x=0; y=yRPE + t*TPHperi; label=lateral;}
 border rightPH(t=0,1){x=wmid; y=yRPE+t*TPHfov; label=lateral;}
-border topPHpara(t=0,1){x=t*wtran; y=yPHpara; label=inner;}
-border topPHtran(t=0,1){x=wtran + t*(wfovea-wtran); y=yPHpara + t*(yPHfovea-yPHpara); label=inner;}
+border topPHperi(t=0,1){x=t*wtran; y=yPHperi; label=inner;}
+border topPHtran(t=0,1){x=wtran + t*(wfovea-wtran); y=yPHperi + t*(yPHfovea-yPHperi); label=inner;}
 border topPHfove(t=0,1){x=wfovea + t*(wret/2.0-wfovea); y=yPHfovea; label=inner;}
 
 // Outer Nuclear Layer
-border leftONL(t=0,1) {x=0; y=yPHpara + t*TONLpara; label=lateral;}
+border leftONL(t=0,1) {x=0; y=yPHperi + t*TONLperi; label=lateral;}
 border rightONL(t=0,1){x=wmid; y=yPHfovea+ t*TONLfov;  label=lateral;}
-border topONLpara(t=0,1){x=t*wtran; y=yONLpara; label=inner;}
-border topONLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yONLpara+t*(yONLfovea-yONLpara); label=inner;}
+border topONLperi(t=0,1){x=t*wtran; y=yONLperi; label=inner;}
+border topONLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yONLperi+t*(yONLfovea-yONLperi); label=inner;}
 border topONLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yONLfovea; label=inner;}
 
 // Outer Plexiform Layer
-border leftOPL(t=0,1) {x=0; y=yONLpara + t*TOPLpara; label=lateral;}
+border leftOPL(t=0,1) {x=0; y=yONLperi + t*TOPLperi; label=lateral;}
 border rightOPL(t=0,1){x=wmid; y=yONLfovea+ t*TOPLfov;  label=lateral;}
-border topOPLpara(t=0,1){x=t*wtran; y=yOPLpara; label=inner;}
-border topOPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yOPLpara+t*(yOPLfovea-yOPLpara); label=inner;}
+border topOPLperi(t=0,1){x=t*wtran; y=yOPLperi; label=inner;}
+border topOPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yOPLperi+t*(yOPLfovea-yOPLperi); label=inner;}
 border topOPLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yOPLfovea; label=inner;}
 
 // Inner Nuclear Layer
-border leftINL(t=0,1) {x=0; y=yOPLpara + t*TINLpara; label=lateral;}
+border leftINL(t=0,1) {x=0; y=yOPLperi + t*TINLperi; label=lateral;}
 border rightINL(t=0,1){x=wmid; y=yOPLfovea+ t*TINLfov;  label=lateral;}
-border topINLpara(t=0,1){x=t*wtran; y=yINLpara; label=inner;}
-border topINLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yINLpara+t*(yINLfovea-yINLpara); label=inner;}
+border topINLperi(t=0,1){x=t*wtran; y=yINLperi; label=inner;}
+border topINLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yINLperi+t*(yINLfovea-yINLperi); label=inner;}
 border topINLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yINLfovea; label=inner;}
 
 // Inner Plexiform Layer
-border leftIPL(t=0,1) {x=0; y=yINLpara + t*TIPLpara; label=lateral;}
+border leftIPL(t=0,1) {x=0; y=yINLperi + t*TIPLperi; label=lateral;}
 border rightIPL(t=0,1){x=wmid; y=yINLfovea+ t*TIPLfov;  label=lateral;}
-border topIPLpara(t=0,1){x=t*wtran; y=yIPLpara; label=inner;}
-border topIPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yIPLpara+t*(yIPLfovea-yIPLpara); label=inner;}
+border topIPLperi(t=0,1){x=t*wtran; y=yIPLperi; label=inner;}
+border topIPLtran(t=0,1){x=wtran+t*(wfovea-wtran); y=yIPLperi+t*(yIPLfovea-yIPLperi); label=inner;}
 border topIPLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yIPLfovea; label=inner;}
 
 // Ganglion Cell Layer
-border leftGCL(t=0,1) {x=0; y=yIPLpara + t*TGCLpara; label=lateral;}
+border leftGCL(t=0,1) {x=0; y=yIPLperi + t*TGCLperi; label=lateral;}
 border rightGCL(t=0,1){x=wmid; y=yIPLfovea+ t*TGCLfov;  label=lateral;}
-border vitr(t=0,1) {x=t*wmid; y = yGCLpara - (yGCLpara-yGCLfovea)*sin(pi*t/2.0); label=vitreous;}
 
+// Vitreous border
+// border vitrperi(t=0,1){x=t*wfovea; y = yGCLperi; label=vitreous;}
+// border vitrpara(t=0,1) {x=wfovea + t*(wmid-wfovea); y = yGCLperi - (yGCLperi-yGCLfovea)*sin(pi*t/2.0); label=vitreous;}
+real A = (yGCLperi+yGCLfovea)/2.0;
+real B = yGCLperi - A;
+border vitr(t=0,1) {x=wmid*t; y = A + B*sin(pi/2.0 + t*pi); label=vitreous;}
 
 mesh Temp = buildmesh(BM(10*n)
 		      + topRPE(5*n) + leftRPE(-n) + rightRPE(n)
-		      + leftPH(-n) + rightPH(n) + topPHpara(n) + topPHtran(n) + topPHfove(n)
-		      + leftONL(-n) + rightONL(n) + topONLpara(n) + topONLtran(n) + topONLfove(n)
-		      + leftOPL(-n) + rightOPL(n) + topOPLpara(3*n) + topOPLtran(3*n) + topOPLfove(n)
-		      + leftINL(-4*n) + rightINL(4*n) + topINLpara(3*n) + topINLtran(3*n) + topINLfove(n)
-		      + leftIPL(-n) + rightIPL(n) + topIPLpara(n) + topIPLtran(n) + topIPLfove(n)
+		      + leftPH(-n) + rightPH(n) + topPHperi(n) + topPHtran(n) + topPHfove(n)
+		      + leftONL(-n) + rightONL(n) + topONLperi(n) + topONLtran(n) + topONLfove(n)
+		      + leftOPL(-n) + rightOPL(n) + topOPLperi(3*n) + topOPLtran(3*n) + topOPLfove(n)
+		      + leftINL(-4*n) + rightINL(4*n) + topINLperi(3*n) + topINLtran(3*n) + topINLfove(n)
+		      + leftIPL(-n) + rightIPL(n) + topIPLperi(n) + topIPLtran(n) + topIPLfove(n)
 		      + leftGCL(-n) + rightGCL(n) + vitr(-10*n));
+		      // vitrpara(-10*n) + vitrperi(-10*n));
 
 // Rearrange the labels for each layer
-// int[int] Labels = [0, GCL, 7, IPL, 12, INL, 17, OPL, 22, ONL, 27, PH, 29, RPE];
+// int[int] Labels = [0, GCL, 7, IPL, 12, INL, 17, OPL, 22, ONL, 27, PH, 29, RPE]; // Use if the vitreous is in two segments
 int[int] Labels = [0, GCL, 6, IPL, 11, INL, 16, OPL, 21, ONL, 26, PH, 28, RPE];
 mesh Th = change(Temp, region=Labels);
 
@@ -211,17 +217,17 @@ real HD;					  // Hematocrit (dimensionless)
 }
 
 // Parametrisation of the capillary plexi
-macro BottomLineICP(a,b) (yINLpara-TICPpara/2.0 + (a-wtran)*(yINLfovea - yINLpara + TICPpara/2. - TICPfovea/2.)/(wfovea-wtran)) //EOM
-macro TopLineICP(a,b)    (yINLpara+TICPpara/2.0 + (a-wtran)*(yINLfovea - yINLpara - TICPpara/2. + TICPfovea/2.)/(wfovea-wtran)) //EOM
+macro BottomLineICP(a,b) (yINLperi-TICPperi/2.0 + (a-wtran)*(yINLfovea - yINLperi + TICPperi/2. - TICPfovea/2.)/(wfovea-wtran)) //EOM
+macro TopLineICP(a,b)    (yINLperi+TICPperi/2.0 + (a-wtran)*(yINLfovea - yINLperi - TICPperi/2. + TICPfovea/2.)/(wfovea-wtran)) //EOM
 
-macro BottomLineDCP(a,b) (yOPLpara-TDCPpara/2.0 + (a-wtran)*(yOPLfovea - yOPLpara - TDCPfovea/2.0 + TDCPpara/2.)/(wfovea-wtran)) //EOM
-macro TopLineDCP(a,b)    (yOPLpara+TDCPpara/2.0 + (a-wtran)*(yOPLfovea - yOPLpara + TDCPfovea/2.0 - TDCPpara/2.)/(wfovea-wtran)) //EOM
+macro BottomLineDCP(a,b) (yOPLperi-TDCPperi/2.0 + (a-wtran)*(yOPLfovea - yOPLperi - TDCPfovea/2.0 + TDCPperi/2.)/(wfovea-wtran)) //EOM
+macro TopLineDCP(a,b)    (yOPLperi+TDCPperi/2.0 + (a-wtran)*(yOPLfovea - yOPLperi + TDCPfovea/2.0 - TDCPperi/2.)/(wfovea-wtran)) //EOM
 
-macro IsICP(a,b) ((a<=wtran & b>yINLpara-TICPpara/2.0 & b<yINLpara+TICPpara/2.0)
+macro IsICP(a,b) ((a<=wtran & b>yINLperi-TICPperi/2.0 & b<yINLperi+TICPperi/2.0)
 		  | (a>wtran & a<wfovea & b>BottomLineICP(a,b) & b<TopLineICP(a,b))
 		  | (a>wfovea & a<wFAZ & b>yINLfovea-TICPfovea/2.0 & b<yINLfovea+TICPfovea/2.0)) //EOM
 
-macro IsDCP(a,b) ((a<wtran & b>yOPLpara-TDCPpara/2.0 & b<yOPLpara+TDCPpara/2.0)
+macro IsDCP(a,b) ((a<wtran & b>yOPLperi-TDCPperi/2.0 & b<yOPLperi+TDCPperi/2.0)
 		  | (a>wtran & a<wfovea & b>BottomLineDCP(a,b) & b<TopLineDCP(a,b))
 		  | (a>wfovea & a<wFAZ & b>yOPLfovea-TDCPfovea/2.0 & b<yOPLfovea+TDCPfovea/2.0)) //EOM
 
