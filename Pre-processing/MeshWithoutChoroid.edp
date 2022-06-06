@@ -146,6 +146,9 @@ border topIPLfove(t=0,1){x=wfovea + t*(wmid-wfovea); y=yIPLfovea; label=inner;}
 // Ganglion Cell Layer
 border leftGCL(t=0,1) {x=0; y=yIPLperi + t*TGCLperi; label=lateral;}
 border rightGCL(t=0,1){x=wmid; y=yIPLfovea+ t*TGCLfov;  label=lateral;}
+real B = (yGCLpara + yGCLfovea)/2.0;
+real A = yGCLpara - B;
+border vitr(t=0,1) {x=t*wmid; y = A*sin(pi/2 + t*pi) + B; label=vitreous;}
 
 // Vitreous border
 // border vitrperi(t=0,1){x=t*wfovea; y = yGCLperi; label=vitreous;}
