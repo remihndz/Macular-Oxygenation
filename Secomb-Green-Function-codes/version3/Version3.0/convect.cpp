@@ -81,10 +81,10 @@ void convect(int isp)
 					for(k=1; k<=nnv; k++) al[i][k] += al[i][j]*al[j][k];//calculate other alpha values
 				}
 			}
-			if(sumin + sumout != 0.) if(fabs(sumin-sumout)/(sumin + sumout) > 0.01)
-				printf("*** Error: Flow conservation violation at node %i\n", nodname[inod]);
-			if(hdsumin + hdsumout != 0.) if(fabs(hdsumin-hdsumout)/(hdsumin + hdsumout) > 0.01)
-				printf("*** Error: Hematocrit conservation violation at node %i\n", nodname[inod]);
+			// if(sumin + sumout != 0.) if(fabs(sumin-sumout)/(sumin + sumout) > 0.01)
+			// 	printf("*** Error: Flow conservation violation at node %i\n", nodname[inod]);
+			// if(hdsumin + hdsumout != 0.) if(fabs(hdsumin-hdsumout)/(hdsumin + hdsumout) > 0.01)
+			// 	printf("*** Error: Hematocrit conservation violation at node %i\n", nodname[inod]);
 		}
 //subsegments of outflow segments - convective fluxes and alpha matrix, including network boundary nodes
 		for(ii=1; ii<=nout; ii++){		//outflows

@@ -38,12 +38,15 @@ void analyzenet()
 			goto foundit1;
 		}
 		printf("*** Error: No matching node found for nodname %i\n", segnodname[1][iseg]);
+		//printf("*** segnodname[1][iseg=%i]=%i and nodname[1]=%i\n", iseg, segnodname[1][iseg], nodname[1]);
+		//for(inod=1; inod<=nnod; inod++) printf("nodname[%i]=%i\n", inod, nodname[inod]);
 		foundit1:;
 		for(inod=1; inod<=nnod; inod++) if(nodname[inod] == segnodname[2][iseg]){
 			iend[iseg] = inod;
 			goto foundit2;
 		}
 		printf("*** Error: No matching node found for nodname %i\n", segnodname[2][iseg]);
+		printf("*** Total number of nodes is %i\n", nnod);
 		foundit2:;
 	}
 //Setup nodtyp, nodseg and nodnod
@@ -63,7 +66,7 @@ void analyzenet()
 	for (inodbc=1; inodbc<=nnodbc; inodbc++){
 		for(inod=1; inod<=nnod; inod++) if(nodname[inod] == bcnodname[inodbc]){
 			bcnod[inodbc] = inod;
-			if(nodtyp[inod] != 1) printf("*** Error: Boundary node %i is not a 1-segment node\n", inod);
+			if(nodtyp[inod] != 1) printf("*** Error: Boundary node %i is not a 1-segment node, rather its a nodtype[%i]=%i\n", inod, inod, nodtyp[inod]);
 			goto foundit;
 		}
 		printf("*** Error: No matching node found for nodname %i\n", bcnodname[inodbc]);

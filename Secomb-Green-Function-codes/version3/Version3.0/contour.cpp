@@ -126,7 +126,7 @@ void contour(const char fname[])
 		fprintf(ofp, "(Solute %i) show\n",isp);  //show solute number
 //create a scale bar
 		float barlength;
-		if(xmax > 500.) barlength = 200.;
+		if(xmax > 500.) barlength = 500.;
 		else barlength = 100.;
 		fprintf(ofp,"%g sl\n",2.);
 		fprintf(ofp,"%g %g m %g %g l stroke\n",120.,50.,120.+scalefac*barlength,50.);
