@@ -12,7 +12,8 @@ See greens.cpp for description of changes.
 #include <string.h>
 #include <math.h>
 #include "nrutil.h"
-#include <Windows.h>	//needed for CopyFile
+#include <fstream>
+#include <sys/stat.h> // for creating Results directory
 
 void input(void);
 void analyzenet(void);
@@ -79,21 +80,44 @@ int main(int argc, char *argv[])
 {
 	int iseg, inod, imain, j, isp;
 	char fname[80];
-	BOOL NoOverwrite = FALSE;
+	bool NoOverwrite = false;
 	FILE *ofp;
 	//Create a Current subdirectory if it does not already exist. August 2017.
-	DWORD ftyp = GetFileAttributesA("Current\\");
-	if (ftyp != FILE_ATTRIBUTE_DIRECTORY) system("mkdir Current");
-
+	// DWORD ftyp = GetFileAttributesA("Current\\");
+	// if (ftyp != FILE_ATTRIBUTE_DIRECTORY) system("mkdir Current");
+	const int dir_err = mkdir("Current", S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 
 	//copy input data files to "Current" directory
-	CopyFile("SoluteParams.dat", "Current\\SoluteParams.dat", NoOverwrite);
-	CopyFile("IntravascRes.dat", "Current\\IntravascRes.dat", NoOverwrite);
-	CopyFile("ContourParams.dat", "Current\\ContourParams.dat", NoOverwrite);
-	CopyFile("VaryParams.dat", "Current\\VaryParams.dat", NoOverwrite);
-	CopyFile("network.dat", "Current\\network.dat", NoOverwrite);
-	CopyFile("tissrate.cpp.dat", "Current\\tissrate.cpp.dat", NoOverwrite);
-
+	// CopyFile("SoluteParams.dat", "Current\\SoluteParams.dat", NoOverwrite);
+	// CopyFile("IntravascRes.dat", "Current\\IntravascRes.dat", NoOverwrite);
+	// CopyFile("ContourParams.dat", "Current\\ContourParams.dat", NoOverwrite);
+	// CopyFile("VaryParams.dat", "Current\\VaryParams.dat", NoOverwrite);
+	// CopyFile("network.dat", "Current\\network.dat", NoOverwrite);
+	// CopyFile("tissrate.cpp.dat", "Current\\tissrate.cpp.dat", NoOverwrite);
+	{
+	  std::ifstream src("SoluteParams.dat");
+	  std::ofstream dst("Current/SoluteParams.dat");
+	}
+	{
+	  std::ifstream src("IntravascRes.dat");
+	  std::ofstream dst("Current/IntravascRes.dat");
+	}
+	{
+	  std::ifstream src("ContourParams.dat");
+	  std::ofstream dst("Current/ContourParams.dat");
+	}	{
+	  std::ifstream src("VaryParams.dat");
+	  std::ofstream dst("Current/varyParams.dat");
+	}
+	{
+	  std::ifstream src("network.dat");
+	  std::ofstream dst("Current/network.dat");
+	}
+	{
+	  std::ifstream src("tissrate.cpp.dat");
+	  std::ofstream dst("Current/tissrate.cpp.dat");
+	}
+	
 	input();
 
 	is2d = 0; //set to 1 for 2d version, 0 otherwise
