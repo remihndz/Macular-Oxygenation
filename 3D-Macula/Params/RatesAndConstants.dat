@@ -1,0 +1,15 @@
+# Contains the rates and constants for the model without choroid
+0.4				# Hematocrit
+0.09				# Saturation drop in the Superficial Capillary Plexus
+0.115				# Saturation drop in the Intermediate Capillary Plexus
+0.194				# Saturation drop in the Deep Capillary Plexus
+0.5				# O2 capacity of red blood cells
+6.8178e-4			# Healthy baseline blood flow
+7.628e-2			# Volume of SCP
+3.269e-2			# Volume of ICP
+3.269e-2			# Volume of DCP
+45.0				# Consumption rate of photoreceptors
+0.0				# Consumption rate of RPE and ONL
+13.0				# Consumption rate of INL, outer IPL and GCL
+26.0				# Consumption rate of OPL and inner IPL
+500e-4				# Width of the foveal avascular zone
