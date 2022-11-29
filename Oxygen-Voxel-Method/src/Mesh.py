@@ -89,7 +89,10 @@ class UniformGrid:
         else:
             raise ValueError("Please enter valid spacings.")
 
-    
+
+    @property
+    def nCells(self):
+        return self._nCells
     @nCells.setter
     def nCells(self, n):
         if (isinstance(n, int)) and n<1:
@@ -98,9 +101,6 @@ class UniformGrid:
             self._nCells = np.array(n).reshape((3,))
         else:
             print("Please enter a valide positive integer.")
-    @property
-    def nCells(self):
-        return self._nCells
 
     @property
     def nCellsTotal(self):
@@ -137,13 +137,13 @@ class UniformGrid:
     def PointToCell(self, X):
         xarr = np.array(X).reshape((3,))
         if (np.any(xarr < self.origin) or np.any(xarr > self.origin + self.dimensions)):
-            raise ValueError(f"Point out {X.tolist()} of bounds for the grid.")
+            raise ValueError(f"Point {X.tolist()} out of bounds for the grid.")
         
         xCentered = self.origin + xarr
         return np.floor(np.divide(xCentered, self.spacing)).astype(int)
     
     def CellCenter(self, ijk):
-        # TODO add the case where ijk is an int (e.g., the indice in a flattened array)
+        # TODO add the case where ijk is an int (i.e., the indice in a flattened array)
         if isinstance(ijk, int):
             k,remainder = divmod(ijk, self.nCells[0]*self.nCells[1])
             j, i = divmod(remainder, self.nCells[1])
@@ -155,9 +155,10 @@ class UniformGrid:
         
         cellCenter = self.origin + self.spacing * ijkarr
         return cellCenter
-    
-    def Dist(self, cell1, cell2):
-        return np.sum(np.abs(np.array(cell1)-np.array(cell2)))
+
+    @staticmethod
+    def Dist(cell1, cell2):
+        return int(np.sum(np.abs(np.array(cell1)-np.array(cell2))))
     
     
     
