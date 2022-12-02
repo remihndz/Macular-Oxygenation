@@ -5,10 +5,11 @@ import pandas as pd
 import networkx as nx
 from Mesh import UniformGrid
 from scipy.linalg import solve
+from math import isclose
 
 class VascularNetwork:
 
-    def __init__(self, ccoFile, units='mm'):
+    def __init__(self, ccoFile, units='mm', **kwargs):
 
         self.G = self.CreateGraph(ccoFile)
         self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).toarray().T # (nVessel, nNodes) matrix
@@ -21,19 +22,114 @@ class VascularNetwork:
 
         # self.PlotGraph(self.G)
 
+        # Pad the cuboid with the radius of the larger vessel to
+        # prevent having vessel cylinder outside the cuboid
         bb = self.BoundingBox()
-        print(f'{bb=}')
-        dimensions = bb[1]-bb[0]
+        maxRad = self.GetVesselData(['radius'])['radius'].max()
+        minRad = self.GetVesselData(['radius'])['radius'].min()*2
+        origin     = kwargs.get('origin', bb[0]) - maxRad
+        dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 2*maxRad
+        spacing    = kwargs.get('spacing', [minRad]*3)
+        
         if dimensions[-1]==0:
-            dimensions[-1] = 0.1
+            dimensions[-1] = 1
+        nCells = kwargs.get('nCells', [20,20,20])
+        
         self.mesh = UniformGrid(dimensions = dimensions,
-                                origin = bb[0])
+                                origin = origin,
+                                nCells = nCells,
+                                spacing = spacing)
 
         # Initialize linear system to None for error handling
         self.Flow_matrix = self.Flow_rhs = None
         self.Flow_loss = None
 
+    def LabelMesh(self, endotheliumThickness : float):
+        """
+        Labels the mesh according to the vascular network and a given endothelium thickness.
+        """
+        self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
+        self.mesh.labels = 0
 
+        for n1, n2, data in self.G.edges(data=True):
+            p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
+            r,l = data['radius'], data['length']
+            vectorDirection = (p1-p2)/l # Unit vector (direction)
+
+            l_new, l_old = np.linalg.norm(p1-p2), l
+            if not l_new == l_old: f"The length stored in the graph's edge data is incorrect: {l_old=} {l_new=} for vessel {(n1,n2)=}: {self.G.nodes[n1]=}, {self.G.nodes[n2]=}."
+            P = np.outer(vectorDirection, vectorDirection) # Matrix of the orthogonal projection onto the vessel axis
+            O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
+
+            # Find the bounding box
+            cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
+            # Iterate through the cells within the bounding box
+            for cellId in [(x,y,z) for x in range(cellMin[0], cellMax[0]+1)
+                                   for y in range(cellMin[1], cellMax[1]+1)
+                                   for z in range(cellMin[2], cellMax[2]+1)]:
+                # Assign new label
+                self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
+
+        print("Labelling successfully completed.")
+        return
+
+    def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
+                               cellId : tuple, endotheliumThickness : float):
+        """
+        Labels a cell within the bounding box of a cylinder.
+        The new label is 0 for tissue, 1 for intravascular and 2 for endothelium.
+        Argument:
+        ---------
+            O : (I-P) with P the projection matrix onto the vessel's axis (centerline)
+            p1, p2 : the end points of the vessel
+            r : the vessel radius
+            cellId : a tuple of the indices i,j,k defining the cell.
+            endotheliumThickness : the thickness of the endothelial layer.
+        """
+        # If we have already labeled it, don't redo it.
+        i,j,k = cellId
+        
+        cellCenter = self.mesh.CellCenter(cellId)
+        d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center
+
+        # First expression should return 2 if both booleans are True
+        if (d < r - endotheliumThickness/2.0):
+            newLabel = 1
+        elif (d < r+endotheliumThickness/2.0):
+            newLabel = 2
+        else:
+            newLabel = 0
+
+        self.mesh.SetLabelOfCell(newLabel, cellId)
+
+        # # Just a check
+        # old_d = d
+        # v1, v2 = p1-p2, p1-cellCenter
+        # if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
+        #     d = 0
+        # else:
+        #     H = np.linalg.norm(v2)
+        #     c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
+        #     d = H * (1-c*c)**0.5
+    # assert isclose(d, old_d), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
+
+        # if (d < r - endotheliumThickness/2.0):
+        #     otherLabel = 1
+        # elif (d < r+endotheliumThickness/2.0):
+        #     otherLabel = 2
+        # else:
+        #     otherLabel = 0
+
+        # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'}
+        # if newLabel!=otherLabel:
+        #     print(f'Cell{cellId} is in the {labelDict[newLabel]} (other method returned {labelDict[otherLabel]}).')
+
+        return 
+
+    def ToVTK(self, VTKFileName):
+        self.mesh.ToVTK(VTKFileName)
+        return
+        
     def Repartition(self, maxDist=1):
         '''
         Split vessels so that end nodes are at most maxDist cells away
@@ -45,12 +141,9 @@ class VascularNetwork:
             # e is a tuple (n1,n2)
             x1, x2 = self.G.nodes[e[0]]['position'], self.G.nodes[e[1]]['position']
             cell1, cell2 = self.mesh.PointToCell(x1), self.mesh.PointToCell(x2)
-
-            dist = self.mesh.Dist(cell1, cell2)
-            assert isinstance(dist, int), f"{dist=} is not an int."
-
-            if dist > maxDist:
-                print(f"edge {e} added to the list of vessels to split.")
+            
+            if self.mesh.Dist(cell1, cell2) > maxDist:
+                # print(f"edge {e} added to the list of vessels to split.")
                 vesselsToSplit.append(e)
 
         # First split those vessels
@@ -58,8 +151,8 @@ class VascularNetwork:
             newVesselsToSplit = []
             
             for e in vesselsToSplit:
-                print(f"Splitting {e}.")
-                newEdges = self.SplitVessel(e)
+                # print(f"Splitting {e}.")
+                newEdges = self._SplitVessel(e)
                 nSplit+=1
 
                 # Check whether the new vessels need to be split again
@@ -74,7 +167,7 @@ class VascularNetwork:
         print(f"Vascular repartion has required {nSplit} splitings.")       
 
 
-    def SplitVessel(self, edge : tuple):
+    def _SplitVessel(self, edge : tuple):
         '''
         Split edge into two segments by adding a node in the middle.
         edge is a tuple (n1,n2) of the nodes forming the segment.
@@ -87,11 +180,13 @@ class VascularNetwork:
         # Add the new node to the list of nodes
         newNodePos = (self.G.nodes[edge[0]]['position'] + self.G.nodes[edge[1]]['position'])/2.0
         self.G.add_node(newNode, position=newNodePos)
-        print(f'Added node {newNode} {self.G[newNode]=}')
+
+        # print(f'Added node {newNode} {self.G[newNode]=}')
 
         ## Update the connectivity
         dataDict = self.G[edge[0]][edge[1]]
-        self.G.remove_edge(*edge)
+        self.G.remove_edge(edge[0], edge[1])
+        # print(f"Removed {edge=}.") 
         # First segment
         dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[0]]['position'])
         self.G.add_edge(edge[0], newNode, **dataDict)
@@ -99,7 +194,7 @@ class VascularNetwork:
         dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[1]]['position'])
         self.G.add_edge(newNode, edge[1], **dataDict)
 
-        print(f'Created edges {(edge[0], newNode)} and {(newNode, edge[1])}')
+        # print(f"Created edges {(edge[0], newNode)} and {(newNode, edge[1])} with length {self.G[edge[0]][newNode]['length']}")
         
         return (edge[0], newNode), (newNode, edge[1])
         
@@ -324,7 +419,7 @@ class VascularNetwork:
             token = f.readline()
             token = f.readline().split() # Tree information
 
-            G.add_node(0, position=np.array([float(xi) for xi in token[:3]]))
+            G.add_node(0, position=np.array([float(xi) for xi in token[:3]]) * lengthConversion)
             
             f.readline() # Blank line
             f.readline() # *Vessels
@@ -341,7 +436,6 @@ class VascularNetwork:
                 vesselRadii[vesselId] = float(vessel[12]) * lengthConversion
                 vesselLength[vesselId] = np.linalg.norm(np.array([float(x) for x in vessel[1:4]])
                                                          -np.array([float(x) for x in vessel[4:7]])) * lengthConversion
-                
                 G.add_node(vesselId+1, position=np.array([float(xi) for xi in vessel[4:7]]) * lengthConversion)
 
             f.readline() # Blank line
@@ -386,228 +480,4 @@ class VascularNetwork:
             C = (0.8 + np.exp(-0.075*d))*(-1+(1+10**-11*(d)**12)**-1)+(1+10**-11*(d)**12)**-1
             return ( 1 + (mu045-1)*((1-hd)**C-1)/((1-0.45)**C-1) )
         
-# class Node:
-#     """
-#     A class to construct a linked list.
-
-#     Attributes:
-#     -----------
-#     pos : numpy.ndarray
-#        the position of the node in 3D cartesian coordinates
-#     next : list
-#        pointers to the daughter nodes
-#     """
-#     def __init__(self, pos, Next=None):
-#         self.data = pos
-#         self.next = Next
-
-#     @property
-#     def next(self):
-#         return self._next       
-#     @next.setter
-#     def next(self, Next):
-#         self._next = Next
-
-# class VascularNetwork:
-#     """
-#     A class to represent a network of vessels embedded in a tissue slab.
-    
-#     Attributes
-#     ----------
-#     C : np.array((nVessels, nNodes))
-#        represents the nodes and edges of the graph (oriented)
-#     R : np.array((nVessels,))
-#        the radius of the vessel segments (=edges)
-#     nodes : dict
-#        a dictionnary of nodes location
-#     edges : list
-#        a list of the edges, each formed by two nodes
-#     mesh : Mesh
-#        the Cartesian mesh within which the network is embedded
-#     isRepartitionned : bool
-#        has the network been repartitionned
-#     nVessels : int
-#        the number of vessels in the network
-
-#     Methods
-#     -------
-#     RepartitionVasculature()
-#         splits vessel segments until similar characteristic length as the mesh's cells 
-#     CheckCharacteristicLengths()
-#         returns whether the characteristic lengths of the vessels and mesh is similar
-#     GetNVessels()
-#         returns the number of vessels.
-#     Label3DMesh()
-#         labels the cells of the mesh 
-#     """
-
-#     def __init__(self, ccoFile : str):
-        
-#         C, R, D, nodes = ReadCCO(ccoFile)
-        
-
-
-
-
-
-#     @classmethod
-#     def ReadCCO(CCOFile):
-        
-#         SegmentsData = []
-#         DistalNodes  = dict()
-        
-#         nodeName = -1
-
-#         with open(CCOFile, 'r') as f:
-                
-#             print(f.readline().strip())
-#             token = f.readline().split()
-#             inletNode = ([float(xi) for xi in token[:3]])
-#             print(f"Inlet at {inletNode}")
-
-#             f.readline()
-#             print(f.readline().strip())
-#             nVessels = int(f.readline())
-#             print(f'The tree has {nVessels} vessels.')
-            
-#             for i in range(nVessels):
-                
-#                 row = (f.readline()).split()
-                
-#                 nodeName+=1
-#                 DistalNodes[int(row[0])] = nodeName
-                    
-#                 if treeType=='Object':
-#                     # Uncomment to keep vessels added in specific stages
-#                     if True:
-#                     # if int(row[-1]) > -2: 
-
-#                         # Id, xProx, xDist, radius, length, flow computed by CCO, distalNode, stage
-#                         SegmentsData.append([int(row[0]),
-#                         np.array([float(x) for x in row[1:4]])*1e4, 
-#                         np.array([float(x) for x in row[4:7]])*1e4,
-#                         float(row[12])*1e4,
-#                         np.linalg.norm(np.array([float(x) for x in row[1:4]])*1e4
-#                                     -np.array([float(x) for x in row[4:7]])*1e4),
-#                         float(row[13]),
-#                         nodeName,
-#                         int(row[-1])])
-                        
-
-#                 else:
-#                     # Id, xProx, xDist, radius, length, flow computed by CCO, distalNode, vesselId (for multiple segments vessels?)
-#                     SegmentsData.append([int(row[0]),
-#                     np.array([float(x) for x in row[1:4]])*1e4, 
-#                     np.array([float(x) for x in row[4:7]])*1e4,
-#                     float(row[8])*1e4,
-#                     float(row[10])*1e4,
-#                     float(row[11]),
-#                     nodeName,
-#                     int(row[-2])])
-                    
-#             if treeType=='Object':            
-#                 df = pd.DataFrame(SegmentsData, columns=['Id', 'xProx', 'xDist', 'Radius', 'Length', 'Flow','DistalNode','Stage'])
-#             else:
-#                 df = pd.DataFrame(SegmentsData, columns=['Id', 'xProx', 'xDist', 'Radius', 'Length', 'Flow','DistalNode','Stage'])
-
-#             df['Inlet'] = False
-#             df['Outlet'] = False
-#             df = df.set_index('Id', drop=False)
-#             df['ParentId'] = -1
-#             df['BranchesId'] = [[] for i in range(df.shape[0])]
-        
-#             f.readline()
-#             print(f.readline().strip())
-            
-#             NodesConnections = []
-#             SegNewName = -1
-#             for i in range(nVessels):
-#                 row = (f.readline()).split()
-#                 SegmentId, ParentId, BranchesIds = int(row[0]), int(row[1]), [int(x) for x in row[2:]]
-
-#                 if SegmentId in DistalNodes:    
-#                     ProximalNode = DistalNodes[SegmentId]
-#                     branchesId = []
-#                     for connection in BranchesIds:
-#                         DistalNode = DistalNodes[connection]
-#                         SegNewName +=1
-#                         NodesConnections.append((ProximalNode, DistalNode, SegNewName, connection))
-#                         branchesId.append(connection)
-#                     df.at[SegmentId, 'BranchesId'] = branchesId    
-                    
-#                     if not BranchesIds:
-#                         df.at[SegmentId, 'Outlet'] = True
-                    
-#                     if not ParentId in DistalNodes: # Inlet node, need to add the proximal node to the tree
-#                         df.at[SegmentId, 'Inlet'] = True
-#                         nodeName+=1
-#                         SegNewName +=1
-#                         NodesConnections.append((nodeName, DistalNodes[SegmentId], SegNewName, SegmentId))
-#                     else:
-#                         df.at[SegmentId, 'ParentId'] = ParentId
-
-        
-#         ## Gives each inlet and its downstream branches a number
-#         def AssignBranchNumberToDownstreamVessels(InletIdx, branchNumber):
-            
-#             # branchNumber = df.at[InletIdx, 'BranchNumber']
-#             branches = df.at[InletIdx, 'BranchesId']
-            
-#             for branchId in branches:
-#                 branchIdx = df[df.Id==branchId].index[0]
-#                 df.at[branchIdx, 'BranchNumber'] = branchNumber
-#                 df.at[branchIdx, 'Bifurcation']  = df.at[InletIdx,'Bifurcation']+1 
-#                 AssignBranchNumberToDownstreamVessels(branchIdx, branchNumber)       
-            
-#         df['BranchNumber'] = -1
-#         df['Bifurcation']  = 0
-#         for i,row in enumerate(df[df.Inlet].iterrows()):
-#             df.at[row[0], 'BranchNumber'] = i        
-#             AssignBranchNumberToDownstreamVessels(row[0],i)
-                        
-#         # Project from the plane to the sphere
-#         if project:
-#             radiusEyeball = 23e3
-#             # xProx = ProjectOnSphere(np.vstack(df['xProx'].to_numpy().ravel()), r=radiusEyeball)
-#             # xDist = ProjectOnSphere(np.vstack(df['xDist'].to_numpy().ravel()), r=radiusEyeball)
-#             xProx = StereographicProjection(np.vstack(df.xProx.to_numpy().ravel()))
-#             xDist = StereographicProjection(np.vstack(df.xDist.to_numpy().ravel()))
-#             df['xProx'] = [xProx[i,:] for i in range(xProx.shape[0])] 
-#             df['xDist'] = [xDist[i,:] for i in range(xDist.shape[0])]
-#             df['Length'] = np.linalg.norm(xProx-xDist, axis=1)
-
-#         ## Create the matrices for the solver
-#         ConnectivityMatrix = np.zeros((nodeName+1, len(SegmentsData)))
-#         Radii  = np.zeros((len(SegmentsData),))
-#         Length = np.zeros((len(SegmentsData),))
-#         df['SegName'] = df.index
-#         df['Id'] = df.index
-#         df['Boundary'] = 0
-#         D = np.zeros((nodeName+1,nodeName+1)) # Decision matrix
-
-        
-#         nodesLoc = dict()
-
-#         for proxNode, distNode, SegmentName, SegmentId in NodesConnections:
-            
-#             ConnectivityMatrix[proxNode, SegmentName] = 1
-#             ConnectivityMatrix[distNode, SegmentName] = -1
-#             Radii[SegmentName] = df.at[SegmentId, 'Radius']
-#             xProx, xDist = df.at[SegmentId, 'xProx'], df.at[SegmentId, 'xDist']
-#             Length[SegmentName] = np.linalg.norm(xProx-xDist)
-
-#             nodesLoc[proxNode] = np.array(xProx).astype(float).reshape((3,))
-#             nodesLoc[distNode] = np.array(xDist).astype(float).reshape((3,))
-
-#             df.at[SegmentId, 'SegName'] = SegmentName
-#             if df.at[SegmentId, 'Inlet']:
-#                 df.at[SegmentId,'Boundary'] = 1
-#                 D[proxNode, proxNode] = 1
-#             elif df.at[SegmentId, 'Outlet']:
-#                 df.at[SegmentId,'Boundary'] = -1
-#                 D[distNode, distNode] = -1
-               
-#         df = df.set_index('SegName')
-  
-#         return ConnectivityMatrix.T, Radii, D, nodesLoc
 

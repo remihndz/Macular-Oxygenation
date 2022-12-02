@@ -30,6 +30,8 @@ class UniformGrid:
         returns the coordinates of the center of the cell indexed by ijk
     Dist(cell1, cell2) 
         returns the distance (in i,j,k coordinates) between the cells.
+    ToVTK(str)
+        saves the mesh, with labels, in vtk structured points format.
     """
     def __init__(self, dimensions=[100.0,100.0,100.0],
         origin=[0.0,0.0,0.0], # The bottom left corner of the cuboid
@@ -41,7 +43,8 @@ class UniformGrid:
 
         if spacing:
             self.spacing = spacing
-            n = ceil(self._dimensions/self._spacing)
+            n = np.ceil(self.dimensions/self.spacing).astype(int)
+            print(self.spacing, self.dimensions, n)
             self.nCells = n
         else:
             self.nCells = nCells 
@@ -117,7 +120,15 @@ class UniformGrid:
             self._labels = np.ones(self.nCells) * newLabels
         else:
             raise ValueError("The number of labels don't match the number of cells.")
-        
+
+    def SetLabelOfCell(self, newLabel, cellId):
+        if not cellId is None:
+            if not isinstance(newLabel, (int, float)):
+                raise ValueError("newLabel must be an int or float.")
+            i,j,k = cellId
+            self._labels[i,j,k] = newLabel
+        return
+    
     
     def __str__(self):
         return f"""
@@ -137,9 +148,9 @@ class UniformGrid:
     def PointToCell(self, X):
         xarr = np.array(X).reshape((3,))
         if (np.any(xarr < self.origin) or np.any(xarr > self.origin + self.dimensions)):
-            raise ValueError(f"Point {X.tolist()} out of bounds for the grid.")
+            raise ValueError(f"Point {X.tolist()} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
         
-        xCentered = self.origin + xarr
+        xCentered = xarr - self.origin
         return np.floor(np.divide(xCentered, self.spacing)).astype(int)
     
     def CellCenter(self, ijk):
@@ -159,6 +170,61 @@ class UniformGrid:
     @staticmethod
     def Dist(cell1, cell2):
         return int(np.sum(np.abs(np.array(cell1)-np.array(cell2))))
+
+    def _BoundingBoxOfVessel(self, p1, p2, r):
+        '''
+        Finds the bounding box for the vessel with end points p1 and p2
+        in cell coordinates (i,j,k indices).
+        For formulas, see https://iquilezles.org/articles/diskbbox/
+        '''
+        n = (p1-p2) # The axis of the cylinder
+        n = r*(1-(n/np.linalg.norm(n))**2)**0.5 # The direction, orthogonal to the axis,
+                                                # where to pick the bounding box corners
+        # Find bounding box for the cylinder as the bounding box of the
+        # bounding boxes of its caps (the disk faces)
+        bboxes = np.array([p1 - n, p1 + n, p2 - n, p2 + n])
+        cellMin, cellMax = self.PointToCell(bboxes.min(axis=0)), self.PointToCell(bboxes.max(axis=0))
+        return cellMin, cellMax
+
+    
+    def ToVTK(self, vtkFileName : str):
+        '''
+        Save the mesh with its label in vtk format for visualisation.
+        '''        
+        with open(vtkFileName, 'w') as f:
+            f.write("# vtk DataFile Version 3.0\n")
+            f.write("A mesh for the computation of oxygen perfusion.\n")
+            # f.write("BINARY\n")
+            f.write("ASCII\n")
+            f.write("DATASET STRUCTURED_POINTS\n")
+            f.write(f"DIMENSIONS {self.nCells[0]} {self.nCells[1]} {self.nCells[2]}\n")
+            f.write(f"ORIGIN {self.origin[0]} {self.origin[1]} {self.origin[2]}\n")
+            f.write(f"SPACING {self.spacing[0]} {self.spacing[1]} {self.spacing[2]}\n")
+            # f.write(f"ORIGIN 0 0 0\n")
+            # f.write(f"SPACING 1 1 1\n")
+            
+            # Writing the data
+            f.write(f"POINT_DATA {self.nCellsTotal}\n")
+            f.write(f"SCALARS labels int 1\n")
+            f.write(f"LOOKUP_TABLE default")
+
+            for i,j,k in [(x,y,z) for z in range(self.nCells[2])
+                          for y in range(self.nCells[1])
+                          for x in range(self.nCells[0])]:
+                #f.write(f"\n{bin(int(self.labels[i,j,k]))}")
+                f.write(f"\n{int(self.labels[i,j,k])}")
+
+            # for label in self.labels.ravel(): # Unsure in what order the 3d-array is ravelled 
+            #     f.write(f"\n{bin(int(label))}")
+                                   
+        return
+            
+    
+
+    
+
+    
+
     
     
     
