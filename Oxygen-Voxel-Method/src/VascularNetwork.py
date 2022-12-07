@@ -6,6 +6,7 @@ import networkx as nx
 from Mesh import UniformGrid
 from scipy.linalg import solve
 from math import isclose
+import vtk
 
 class VascularNetwork:
 
@@ -26,15 +27,15 @@ class VascularNetwork:
         # prevent having vessel cylinder outside the cuboid
         bb = self.BoundingBox()
         maxRad = self.GetVesselData(['radius'])['radius'].max()
-        minRad = self.GetVesselData(['radius'])['radius'].min()*2
+        minRad = self.GetVesselData(['radius'])['radius'].min()
         origin     = kwargs.get('origin', bb[0]) - maxRad
         dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 2*maxRad
-        spacing    = kwargs.get('spacing', [minRad]*3)
+        spacing    = kwargs.get('spacing', [minRad/2])
         
         if dimensions[-1]==0:
             dimensions[-1] = 1
         nCells = kwargs.get('nCells', [20,20,20])
-        
+
         self.mesh = UniformGrid(dimensions = dimensions,
                                 origin = origin,
                                 nCells = nCells,
@@ -49,7 +50,8 @@ class VascularNetwork:
         Labels the mesh according to the vascular network and a given endothelium thickness.
         """
         self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
-        self.mesh.labels = 0
+        # self.mesh.labels = 0
+        self.mesh.labels.EmptyMatrix()
 
         for n1, n2, data in self.G.edges(data=True):
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
@@ -61,7 +63,10 @@ class VascularNetwork:
             P = np.outer(vectorDirection, vectorDirection) # Matrix of the orthogonal projection onto the vessel axis
             O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
 
-            # Find the bounding box
+            ## Find the bounding box
+            # To ensure full enclosure of the vessel, the bounding box is should
+            # bound the vessel extended by its radius in each direction
+            p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
             cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
             # Iterate through the cells within the bounding box
             for cellId in [(x,y,z) for x in range(cellMin[0], cellMax[0]+1)
@@ -90,9 +95,9 @@ class VascularNetwork:
         i,j,k = cellId
         
         cellCenter = self.mesh.CellCenter(cellId)
+        
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center
 
-        # First expression should return 2 if both booleans are True
         if (d < r - endotheliumThickness/2.0):
             newLabel = 1
         elif (d < r+endotheliumThickness/2.0):
@@ -100,36 +105,79 @@ class VascularNetwork:
         else:
             newLabel = 0
 
-        self.mesh.SetLabelOfCell(newLabel, cellId)
+        # print(f'{newLabel=}: {d=} {r=} {endotheliumThickness=}')
+        
+        # Just a check
+        old_d = d
+        v1, v2 = p2-p1, cellCenter-p1
+        if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
+            d = 0
+        else:
+            H = np.linalg.norm(v2)
+            c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
+            d = H * (1-c*c)**0.5
+        assert isclose(d, old_d), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
 
-        # # Just a check
-        # old_d = d
-        # v1, v2 = p1-p2, p1-cellCenter
-        # if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
-        #     d = 0
-        # else:
-        #     H = np.linalg.norm(v2)
-        #     c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
-        #     d = H * (1-c*c)**0.5
-    # assert isclose(d, old_d), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
+        if (d < r - endotheliumThickness/2.0):
+            otherLabel = 1
+        elif (d < r+endotheliumThickness/2.0):
+            otherLabel = 2
+        else:
+            otherLabel = 0
 
-        # if (d < r - endotheliumThickness/2.0):
-        #     otherLabel = 1
-        # elif (d < r+endotheliumThickness/2.0):
-        #     otherLabel = 2
-        # else:
-        #     otherLabel = 0
-
-        # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'}
+        labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'}
         # if newLabel!=otherLabel:
         #     print(f'Cell{cellId} is in the {labelDict[newLabel]} (other method returned {labelDict[otherLabel]}).')
+            #newLabel = otherLabel
 
-        return 
+        self.mesh.SetLabelOfCell(newLabel, cellId)
 
-    def ToVTK(self, VTKFileName):
+        # print(f'{p1=} {p2=} {cellCenter=} {p1-cellCenter=} {d=}')
+        
+        return newLabel
+
+    def MeshToVTK(self, VTKFileName):
         self.mesh.ToVTK(VTKFileName)
         return
-        
+    
+    def VesselsToVTK(self, VTKFileName):
+        # Create list of points (nodes)
+        points = vtk.vtkPoints()
+        points.SetNumberOfPoints(self.nNodes())
+        for n, data in self.G.nodes(data=True):
+            points.SetPoint(n, data['position'])
+
+        # Create list of lines (vessels)
+        # with list of radius
+        lines = vtk.vtkCellArray()
+        radius = vtk.vtkDoubleArray()
+        radius.SetName("radius")
+        for n1, n2, data in self.G.edges(data=True):
+            line = vtk.vtkLine()
+            line.GetPointIds().SetId(0, n1)
+            line.GetPointIds().SetId(1, n2)
+            lines.InsertNextCell(line)
+            radius.InsertNextValue(data['radius'])
+
+        # Create the polydata
+        polydata = vtk.vtkPolyData()
+        polydata.SetPoints(points)
+        polydata.GetCellData().AddArray(radius)
+        polydata.SetLines(lines)
+
+        # Write the polydata
+        writer = vtk.vtkXMLPolyDataWriter()
+        writer.SetFileName(VTKFileName)
+        writer.SetInputData(polydata)
+        writer.SetDataModeToBinary()
+        writer.Update()
+        writer.Write()
+
+        return
+            
+            
+            
+        return
     def Repartition(self, maxDist=1):
         '''
         Split vessels so that end nodes are at most maxDist cells away
