@@ -19,8 +19,8 @@ class UniformGrid:
         the total number of cells in the grid
     spacing : numpy.ndarray((3,))
         the length of the cells for each axis
-    labels : numpy.ndarray((nx,ny,nz))
-        a 3D array of labels for each cell
+    labels : ndarray((nx,ny,nz))
+        a (sparse) 3D array of labels for each cell
     
     Methods
     -------
@@ -55,7 +55,7 @@ class UniformGrid:
             self.spacing = spac
 
         # self.labels = 0 # 0 for tissue, 1 for intravascular and 2 for endothelium
-        self.labels = NDSparseMatrix(size=self.nCells, dim=3, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
+        self.labels = NDSparseMatrix(size=self.nCells, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
         
         print(self)
     
@@ -116,29 +116,36 @@ class UniformGrid:
     @property
     def labels(self):
         return self._labels
-    #@labels.setter
-    # def labels(self, newLabels):
-    #     if np.array(newLabels).size == self.nCellsTotal:
-    #         self._labels = np.array(newLabels).reshape(self.nCells)
-    #     elif np.array(newLabels).size == 1:
-    #         self._labels = np.ones(self.nCells) * newLabels
-    #     else:
-    #         raise ValueError("The number of labels don't match the number of cells.")
-
-    # def SetLabelOfCell(self, newLabel, cellId):
-    #     if not cellId is None:
-    #         if not isinstance(newLabel, (int, float)):
-    #             raise ValueError("newLabel must be an int or float.")
-    #         i,j,k = cellId
-    #         self._labels[i,j,k] = newLabel
-    #     return    
+   
     @labels.setter
     def labels(self, newLabels):
         assert isinstance(newLabels, NDSparseMatrix), "New labels must be an NDSparseMatrix."
         self._labels = newLabels
         return
+
     def SetLabelOfCell(self, newLabel : int, cellId : tuple):
-        self._labels.addValue(cellId, newLabel)
+        '''
+        Returns False if labels[cellId] has not been updated.
+        '''
+        oldLabel = self.readValue(cellId)
+        updateValue = False
+        # Vessel label takes priority over other labels
+        if newLabel == 1 and (oldLabel == 0 or oldLabel == 2):
+            updateValue = True
+        # Endothelial label takes priority over tissue label
+        elif newLabel == 2 and oldLabel == 0:
+            updateValue = True
+        if updateValue:
+            self._labels.addValue(cellId, newLabel)
+        return updateValue
+
+    def 3DToFlatIndex(self, ijk : tuple):
+        return self.nCells[0]*self.nCells[1]*ijk[2] + self.nCells[0]*ijk[1] + i
+    def FlatIndexTo3D(self, idx : int):
+        k = idx // (self.nCells[0]*self.nCells[1])
+        j = (idx - k*self.nCells[0]*self.nCells[1]) // self.nCells[0]
+        i = idx - self.nCells[0] * (j + self.nCells[1]*k)
+        return (i,j,k)        
     
     def __str__(self):
         return f"""
@@ -164,16 +171,12 @@ class UniformGrid:
         return np.floor(np.divide(xCentered, self.spacing)).astype(int)
     
     def CellCenter(self, ijk):
-        # TODO add the case where ijk is an int (i.e., the indice in a flattened array)
         if isinstance(ijk, int):
-            k,remainder = divmod(ijk, self.nCells[0]*self.nCells[1])
-            j, i = divmod(remainder, self.nCells[1])
-            ijkarr = np.array([i,j,k])
+            ijkarr = np.array(self.FlatIndexTo3D(ijk))
         else:
-            ijkarr = np.array(ijk).reshape((3,))
+            ijkarr = np.array(ijk).reshape((3,)) 
         if np.any(ijkarr-self.nCells > 0):
-            raise ValueError(f"Indices {ijkarr.tolist()} out of bounds for the grid.")
-        
+            raise ValueError(f"Indices {ijkarr.tolist()} out of bounds for the grid.")        
         cellCenter = self.origin + self.spacing * ijkarr
         return cellCenter
 

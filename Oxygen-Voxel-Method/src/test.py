@@ -4,7 +4,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 
 w = 1e-3 # 1 micron
-V = VascularNetwork('1Vessel.cco', spacing=1e-2)# spacing = [1e-1, w, w], origin=[-0.5, -0.1, -0.1], dimensions = [2,0.2,0.2])
+V = VascularNetwork('1Vessel.cco', spacing = [1e-1, w, w])#, origin=[-0.5, -0.1, -0.1], dimensions = [2,0.2,0.2])
 V.VesselsToVTK('Vessels.vtp')
 V.LabelMesh(w)
 V.MeshToVTK('LabelledMesh.vtk')

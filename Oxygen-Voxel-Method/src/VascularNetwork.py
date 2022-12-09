@@ -6,7 +6,7 @@ import networkx as nx
 from Mesh import UniformGrid
 from scipy.linalg import solve
 from math import isclose
-import vtk
+from NDSparseMatrix import NDSparseMatrix
 
 class VascularNetwork:
 
@@ -28,9 +28,9 @@ class VascularNetwork:
         bb = self.BoundingBox()
         maxRad = self.GetVesselData(['radius'])['radius'].max()
         minRad = self.GetVesselData(['radius'])['radius'].min()
-        origin     = kwargs.get('origin', bb[0]) - maxRad
-        dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 2*maxRad
-        spacing    = kwargs.get('spacing', [minRad/2])
+        origin     = kwargs.get('origin', bb[0]) - 2*maxRad
+        dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 4*maxRad
+        spacing    = kwargs.get('spacing', [minRad/4]*3)
         
         if dimensions[-1]==0:
             dimensions[-1] = 1
@@ -45,15 +45,20 @@ class VascularNetwork:
         self.Flow_matrix = self.Flow_rhs = None
         self.Flow_loss = None
 
-    def LabelMesh(self, endotheliumThickness : float):
+    def LabelMesh(self, endotheliumThickness : float, returnIntravascularConnectivity = False):
         """
-        Labels the mesh according to the vascular network and a given endothelium thickness.
+        Labels the mesh according to the vascular network and a given endothelium thickness and returns the associated connectivity matrices.
         """
         self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
         # self.mesh.labels = 0
         self.mesh.labels.EmptyMatrix()
 
-        for n1, n2, data in self.G.edges(data=True):
+        # The empty connectivity matrices
+        ConnVascNodesToEndothelialCells = NDSparseMatrix(size=(self.nNodes, self.nNodes+self.mesh.nCellsTotal()), defaultValue = 0)
+        if returnIntravascularConnectivity:
+            ConnVascNodeToIntravascCells = NDSparseMatrix(size=(self.nNodes, self.nNodes+self.mesh.nCellsTotal()), defaultValue = 0)
+                                          
+        for i, n1, n2, data in enumerate(self.G.edges(data=True)):
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
             r,l = data['radius'], data['length']
             vectorDirection = (p1-p2)/l # Unit vector (direction)
@@ -73,10 +78,17 @@ class VascularNetwork:
                                    for y in range(cellMin[1], cellMax[1]+1)
                                    for z in range(cellMin[2], cellMax[2]+1)]:
                 # Assign new label
-                self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
+                updatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
 
+                # Populate connectivity matrix
+                ConnVascNodesToEndothelialCells.addValue((i, self.mesh.3DToFlatIndex(cellId)), 1)
+                
         print("Labelling successfully completed.")
-        return
+
+        if returnIntravascularConnectivity:
+            return ConnVascNodesToEndothelialCells, ConnVascNodeToIntravascCells
+        else:
+            return ConnVascNodesToEndothelialCells
 
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
                                cellId : tuple, endotheliumThickness : float):
@@ -125,16 +137,9 @@ class VascularNetwork:
         else:
             otherLabel = 0
 
-        labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'}
-        # if newLabel!=otherLabel:
-        #     print(f'Cell{cellId} is in the {labelDict[newLabel]} (other method returned {labelDict[otherLabel]}).')
-            #newLabel = otherLabel
-
-        self.mesh.SetLabelOfCell(newLabel, cellId)
-
-        # print(f'{p1=} {p2=} {cellCenter=} {p1-cellCenter=} {d=}')
-        
-        return newLabel
+        # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'} 
+        updatedValue = self.mesh.SetLabelOfCell(newLabel, cellId)        
+        return updatedValue, newLabel
 
     def MeshToVTK(self, VTKFileName):
         self.mesh.ToVTK(VTKFileName)
