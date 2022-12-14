@@ -3,7 +3,7 @@ import numpy as np
 from NDSparseMatrix import NDSparseMatrix # A custom sparse matrix storage. No mathematical operation implemented
 import vtk 
 
-class UniformGrid:
+class UniformGrid(object):
     """
     A class representing an uniform grid.
 
@@ -21,7 +21,9 @@ class UniformGrid:
         the length of the cells for each axis
     labels : ndarray((nx,ny,nz))
         a (sparse) 3D array of labels for each cell
-    
+    v : float
+        The volume of a cell in the (uniform) grid.
+
     Methods
     -------
     PointToCell(point)
@@ -56,15 +58,31 @@ class UniformGrid:
 
         # self.labels = 0 # 0 for tissue, 1 for intravascular and 2 for endothelium
         self.labels = NDSparseMatrix(size=self.nCells, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
+
+        self.v = np.prod(self.spacing) # Volume of a cell.
         
         print(self)
     
+
+    @property
+    def v(self) -> float:
+        return self._v
+    @v.setter
+    def v(self, newVolume : float):
+        self._v = newVolume
         
     @property
     def dimensions(self):
         return self._dimensions       
     @dimensions.setter
     def dimensions(self, dims):
+        """FIXME! briefly describe function
+
+        :param dims: 
+        :returns: 
+        :rtype: 
+
+        """
         if np.all(np.array(dims) > 0.0) and np.array(dims).size==3:
             self._dimensions = np.array(dims).reshape((3,))
         else:
@@ -75,6 +93,13 @@ class UniformGrid:
         return self._origin          
     @origin.setter
     def origin(self, orig):
+        """FIXME! briefly describe function
+
+        :param orig: 
+        :returns: 
+        :rtype: 
+
+        """
         if np.array(orig).size==3:
             self._origin = np.array(orig).reshape((3,))
         else:
@@ -86,6 +111,13 @@ class UniformGrid:
         return self._spacing    
     @spacing.setter
     def spacing(self, spac):
+        """FIXME! briefly describe function
+
+        :param spac: 
+        :returns: 
+        :rtype: 
+
+        """
         if np.all(np.array(spac) > 0.0):
             if np.array(spac).size==3:
                 self._spacing = np.array(spac).reshape((3,))
@@ -111,6 +143,12 @@ class UniformGrid:
 
     @property
     def nCellsTotal(self):
+        """FIXME! briefly describe function
+
+        :returns: 
+        :rtype: 
+
+        """
         return np.prod(self._nCells)            
 
     @property
@@ -141,6 +179,7 @@ class UniformGrid:
 
     def 3DToFlatIndex(self, ijk : tuple):
         return self.nCells[0]*self.nCells[1]*ijk[2] + self.nCells[0]*ijk[1] + i
+
     def FlatIndexTo3D(self, idx : int):
         k = idx // (self.nCells[0]*self.nCells[1])
         j = (idx - k*self.nCells[0]*self.nCells[1]) // self.nCells[0]

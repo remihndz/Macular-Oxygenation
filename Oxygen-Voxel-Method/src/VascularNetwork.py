@@ -8,10 +8,69 @@ from scipy.linalg import solve
 from math import isclose
 from NDSparseMatrix import NDSparseMatrix
 
-class VascularNetwork:
+class VascularNetwork(object):
+    """A class storing a vascular network given in a .cco format.
+    TODO: add different input files than .cco.
+    Attributes:
+    -----------
+    G : networkx.DiGraph
+       the directed graph of the network, contains location, size and flow (if yet computed) information.
+    mesh : Mesh.UniformGrid
+       a mesh of the tissue surrounding the vasculature.
+    w : float
+       Vessel wall thickness.
+    Flow_matrix : numpy.ndarray
+       the left hand side matrix of the blood flow model.
+    pProx : float
+       inlet pressure value.
+    qProx : float
+       inlet flow value.
+    pDist : float
+       outlet pressure value.
+    qDist : float
+       outlet flow value.
+       
+    Methods:
+    --------
+    LabelMesh(endotheliumThickness, repartition=True, returnIntravascularConnectivity=False)
+        Labels the mesh according to the vascular vessel. Spliting of the vessel segments is performed prior to labelling unless specified otherwise.
+    MeshToVTK(VTKFileName)
+        Saves the mesh in .vtk legacy format.
+    VesselsToVTK(VTKFileName)
+        Saves the vascular network in legacy vtp format.
+    Repartition(maxDist=1)
+        Split vessel segments to fit mesh size
+    SetLinearSystem(**kwargs)
+        Assembles the linear system of blood flow model.
+    SolveFlow()
+        Solves blood flow with the boundary conditions set.
+    MakeMc()
+        Returns the O2 convection in vessels subsystem.
+    nNodes()
+        Returns the number of nodes in the network.
+    nVessels()
+        Returns the number of vessels in the network.
+    BoundingBox()
+        Return the bounding box of the network.
+    PlotGraph(Graph)
+        Plots a graph.
+    """
+    
+    def __init__(self, ccoFile : str, units : str='mm', **kwargs):        
+        """Creator for the class VascularNetwork
 
-    def __init__(self, ccoFile, units='mm', **kwargs):
+        Parameters
+        ----------
+        ccoFile : str
+            the input network in .cco format
+        units : str
+            the length units. Must be one of
+            {'mm','cm','micron','mum'}.
+        **kwargs : 
+            additional mesh parameters
+            {'dimensions','origin','spacing'}
 
+        """
         self.G = self.CreateGraph(ccoFile)
         self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).toarray().T # (nVessel, nNodes) matrix
         self._lengthConversionDict = {'mm':1e1,
@@ -45,13 +104,35 @@ class VascularNetwork:
         self.Flow_matrix = self.Flow_rhs = None
         self.Flow_loss = None
 
-    def LabelMesh(self, endotheliumThickness : float, returnIntravascularConnectivity = False):
+    def LabelMesh(self, endotheliumThickness : float, repartition :bool=True, returnIntravascularConnectivity:bool=False):
+        """Labels the tissue surrounding the vessels. 
+
+        Parameters
+        ----------
+        endotheliumThickness : float
+            Thickness of the endothelium.
+        repartition : bool, default=True
+            Set to 'True' to split vessels to fit mesh size.
+        returnIntravascularConnectivity : bool, default=False
+            If 'True', returns the connectivity matrix for the cells
+            of the mesh labelled as intravascular.
+        
+        Returns
+        -------
+        ConnVascNodesToEndothelialCells : NDSparseMatrix
+            The connectivity matrix of vascular nodes to endothelial cells.
+        ConnVascNodeToIntravascCells : NDSparseMatrix
+            The connectivity matrix of vascular cells
+
+        TODO: make the connectivity matrices networkx graphs.
         """
-        Labels the mesh according to the vascular network and a given endothelium thickness and returns the associated connectivity matrices.
-        """
-        self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
+
+        
+        if repartition:
+            self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
         # self.mesh.labels = 0
         self.mesh.labels.EmptyMatrix()
+        self.w = endotheliumThickness
 
         # The empty connectivity matrices
         ConnVascNodesToEndothelialCells = NDSparseMatrix(size=(self.nNodes, self.nNodes+self.mesh.nCellsTotal()), defaultValue = 0)
@@ -78,10 +159,15 @@ class VascularNetwork:
                                    for y in range(cellMin[1], cellMax[1]+1)
                                    for z in range(cellMin[2], cellMax[2]+1)]:
                 # Assign new label
-                updatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
+                HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
 
-                # Populate connectivity matrix
-                ConnVascNodesToEndothelialCells.addValue((i, self.mesh.3DToFlatIndex(cellId)), 1)
+                if HasUpdatedValue and newLabel==2:
+                    # Add to connectivity matrix if the cell label changed from tissue to endothelial
+                    ConnVascNodesToEndothelialCells.addValue( (i, self.mesh.3DToFlatIndex(cellId)), 1)
+                elif returnIntravascularConnectivity and HasUpdatedValue and newLabel==1:
+                    # Add to connectivity matrix if the cell label changed from tissue or endothelial to vascular
+                    ConnVascNodeToIntravascCells.addValue( (i,self.mesh.3DToFlatIndex(cellId)), 1 )
+                
                 
         print("Labelling successfully completed.")
 
@@ -95,13 +181,18 @@ class VascularNetwork:
         """
         Labels a cell within the bounding box of a cylinder.
         The new label is 0 for tissue, 1 for intravascular and 2 for endothelium.
-        Argument:
-        ---------
-            O : (I-P) with P the projection matrix onto the vessel's axis (centerline)
-            p1, p2 : the end points of the vessel
-            r : the vessel radius
-            cellId : a tuple of the indices i,j,k defining the cell.
-            endotheliumThickness : the thickness of the endothelial layer.
+        Parameters:
+        -----------
+            O : numpy.ndarray
+                (I-P) with P the projection matrix onto the vessel's axis (centerline)
+            p1, p2 : numpy.ndarray
+                the end points of the vessel.
+            r : float
+                the vessel's radius.
+            cellId : tuple
+                the indices i,j,k locating the cell in the mesh.
+            endotheliumThickness : float
+                the thickness of the endothelial layer.
         """
         # If we have already labeled it, don't redo it.
         i,j,k = cellId
@@ -430,7 +521,12 @@ class VascularNetwork:
         else:
             raise ValueError("Provide a valid mesh type (i.e., an instance of the UniformGrid class).")
         
-    
+    @property
+    def w(self) -> float:
+        return self._w
+    @w.setter
+    def w(self, endotheliumThickness : float):
+        self._w = endotheliumThickness
         
     @property
     def units(self):
@@ -446,11 +542,7 @@ class VascularNetwork:
 
     def BoundingBox(self):
         nodes = np.array([self.G.nodes[n]['position'] for n in self.G.nodes])
-        return [np.min(nodes, axis=0), np.max(nodes, axis=0)]
-
-
-    # def Repartition(self):
-        
+        return [np.min(nodes, axis=0), np.max(nodes, axis=0)]        
         
 
     @staticmethod
