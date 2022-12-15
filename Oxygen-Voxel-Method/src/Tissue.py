@@ -2,7 +2,8 @@ from VascularNetwork import VascularNetwork
 # from Mesh import UniformGrid
 import networkx as nx
 import scipy.sparse as sp
-
+from typing import Union
+import numpy as np
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -102,7 +103,7 @@ class Tissue(object):
         return self.Vessels.w
     @property
     def nVol(self):
-        return self.Vessels.mesh.nCellsTotal()
+        return self.Vessels.mesh.nCellsTotal
     @property
     def nPoints(self):
         return self.Vessels.nNodes()
@@ -137,6 +138,8 @@ class Tissue(object):
         U : float
             Transmembrane permeability coefficient.
         """
+        
+        print("Assembling the mass transfer coefficients matrix", end='....')
         vesselData = self.Vessels.GetVesselData(['radius', 'length'])
         # Compute (curved) surface area of each vessel
         # as an estimate of the contact area between
@@ -145,14 +148,16 @@ class Tissue(object):
         # endothelial cells attached to the vessel,
         # namely the number of 1s in a row -1 for
         # the column corresponding to the node itself.
-        
-        A = 2*np.pi*vesselData['radius']*vesselData['length']/( self.CellToSegment.sum(axis=1) - 1 )
+
+        # A = 2*np.pi*vesselData['radius']*vesselData['length']/( self.CellToSegment.sum(axis=1) - 1 )
+        A = vesselData['radius'].max()*vesselData['length'].max()*( self.CellToSegment.sum(axis=1)-1 )
         # del A
         M = sp.diags(A*U/self.endotheliumThickness,
                      offsets=0, format='csr', dtype=np.float32)
-        M = CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
-        M = M @ CellToSegment
+        M = self.CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
+        M = M @ self.CellToSegment
         self.Mc = M
+        print(' Done.')
         return
 
     def MakeReactionDiffusion(self, D : float, kt : float):
@@ -168,6 +173,7 @@ class Tissue(object):
         TODO: code the possibility for non-uniform grid.
         """
 
+        print("Assembling the reaction-diffusion matrix", end='....')
         M = sp.dok_array((self.nVol, self.nVol), dtype=np.float32)
         spacing = self.dx
         v = np.prod(spacing) # Volume of each cells
@@ -175,16 +181,16 @@ class Tissue(object):
         dx,dy,dz = spacing
         for cellFlatIndex in range(self.nVol):
             cell3DIndex = np.array(self.Vessels.mesh.FlatIndexTo3D(cellFlatIndex))
-            cellLabel = self.labels[cell3DIndex]
+            cellLabel = self.labels[(ind for ind in cell3DIndex)]
 
             if cellLabel in [0,2]: # Diffusion does not happen in intravascular elements
                 # Add the flux of each face.
                 # Flux is 0 on boundary faces.
                 for m in range(3):
                     for n in [-1, 1]:
-                        neighbour = cell3DIndex + np.array([m if l==m else 0 for l in range(3)])
+                        neighbour = cell3DIndex + np.array([n if l==m else 0 for l in range(3)])
                         if self.Vessels.mesh.IsInsideMesh(neighbour):
-                            neighbhourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
+                            neighbourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
                             flux = D*spacing[m-1]*spacing[m-2]/spacing[m]
                             M[cellFlatIndex, cellFlatIndex] -= flux
                             M[cellFlatIndex, neighbourFlatIndex] = flux
@@ -194,6 +200,8 @@ class Tissue(object):
                     M[cellFlatIndex, cellFlatIndex] -= kt*v
 
         self.Md = M.tocsr()
+
+        print(' Done.')
         return
     
     def MakeConvection(self, **kwargs):
@@ -217,7 +225,9 @@ class Tissue(object):
         pDist : float
             Outlet blood pressure.        
         """
-        self.Vessels.SetLinearSystem(kwargs)
+
+        print("Assembling the convection matrix")
+        self.Vessels.SetLinearSystem(**kwargs)
         self.Vessels.SolveFlow()
         M = sp.dok_array((self.nPoints, self.nPoints), dtype=np.float32)
         for node in self.Vessels.G.nodes():
@@ -231,10 +241,11 @@ class Tissue(object):
                 for otherNode in successors:
                     flow = self.Vessels.G[node][otherNode]['flow']
                     length = self.Vessels.G[node][otherNode]['length']
-                    M[node, othernode] = -flow/length
+                    M[node, otherNode] = -flow/length
                     M[node, node] += flow/length
 
         self.Mc = M.tocsr()
+        print('Done.')
         return
 
     def MakeRHS(self, cv : float):
@@ -249,14 +260,23 @@ class Tissue(object):
         cv : float
              Inlet concentration of blood oxygen.
         """
-        cvBar = sp.dok_array((self.nPoints,), dtype=np.float32)
+
+        print("Assembling the right-hand-side vector", end='....')
+        self.rhs = sp.dok_array((self.nPoints+self.nVol,), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             if not self.Vessels.G.pred[node]:
                 # No parent found
-                cvBar[node] = cv
+                self.RHS[node] = cv
+        # NOTE: the no-flux BC for tissue does not add anything to the rhs
+        print(' Done.')
+        return
 
-        ctBar = sp.dok_array((self.nVol,), dtype=np.float32)
-        for 
-                
+    def VesselsToVTK(self, VTKFileName : str):
+        self.Vessels.VesselsToVTK(VTKFileName)
+        return
+
+    def MeshToVTK(self, VTKFileName : str):
+        self.Vessels.MeshToVTK(VTKFileName)
+        return
         
     

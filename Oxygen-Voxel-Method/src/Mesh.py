@@ -1,7 +1,8 @@
 from Cell import Cell
 import numpy as np
 from NDSparseMatrix import NDSparseMatrix # A custom sparse matrix storage. No mathematical operation implemented
-import vtk 
+import vtk
+from typing import Union
 
 class UniformGrid(object):
     """
@@ -26,6 +27,8 @@ class UniformGrid(object):
 
     Methods
     -------
+    IsInsideMesh(tuple or np.ndarray)
+        Returns True if the (i,j,k) input is within the mesh.
     PointToCell(point)
         returns the cell to which point belongs
     CellCenter([i,j,k] or int)
@@ -143,12 +146,6 @@ class UniformGrid(object):
 
     @property
     def nCellsTotal(self):
-        """FIXME! briefly describe function
-
-        :returns: 
-        :rtype: 
-
-        """
         return np.prod(self._nCells)            
 
     @property
@@ -165,7 +162,7 @@ class UniformGrid(object):
         '''
         Returns False if labels[cellId] has not been updated.
         '''
-        oldLabel = self.readValue(cellId)
+        oldLabel = self.labels.readValue(cellId)
         updateValue = False
         # Vessel label takes priority over other labels
         if newLabel == 1 and (oldLabel == 0 or oldLabel == 2):
@@ -177,14 +174,35 @@ class UniformGrid(object):
             self._labels.addValue(cellId, newLabel)
         return updateValue
 
-    def 3DToFlatIndex(self, ijk : tuple):
-        return self.nCells[0]*self.nCells[1]*ijk[2] + self.nCells[0]*ijk[1] + i
+    def ToFlatIndexFrom3D(self, ijk : tuple):
+        return self.nCells[0]*self.nCells[1]*ijk[2] + self.nCells[0]*ijk[1] + ijk[0]
 
     def FlatIndexTo3D(self, idx : int):
         k = idx // (self.nCells[0]*self.nCells[1])
         j = (idx - k*self.nCells[0]*self.nCells[1]) // self.nCells[0]
         i = idx - self.nCells[0] * (j + self.nCells[1]*k)
         return (i,j,k)        
+
+
+    def IsInsideMesh(self, ijk : Union[tuple, np.ndarray]) ->bool:
+        """Check if an (i,j,k) is a valid index for the mesh.
+
+        Parameters
+        ----------
+        ijk : tuple
+            The index to check.
+
+        Returns
+        -------
+        bool
+            True if inside the mesh.
+        """
+        for m in range(3):
+            if ijk[m] < 0:
+                return False
+            if ijk[m] > self.nCells[m]-1:
+                return False
+        return True
     
     def __str__(self):
         return f"""
@@ -193,6 +211,7 @@ class UniformGrid(object):
             Origin: {self.origin}
             Number of cells: {self.nCells}
             Spacing: {self.spacing}
+            Total number of cells: {self.nCellsTotal}
         """
 
     def __repr__(self):

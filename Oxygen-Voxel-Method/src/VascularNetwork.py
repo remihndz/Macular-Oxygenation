@@ -4,10 +4,11 @@ import Node
 import pandas as pd
 import networkx as nx
 from Mesh import UniformGrid
-from scipy.linalg import solve
 from math import isclose
 from NDSparseMatrix import NDSparseMatrix
 import scipy.sparse as sp
+import scipy.sparse.linalg
+import vtk
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -73,7 +74,7 @@ class VascularNetwork(object):
 
         """
         self.G = self.CreateGraph(ccoFile)
-        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).toarray().T # (nVessel, nNodes) matrix
+        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T # (nVessel, nNodes) matrix
         self._lengthConversionDict = {'mm':1e1,
                                       'cm':1.0,
                                       'micron':1e4,
@@ -132,9 +133,9 @@ class VascularNetwork(object):
         self.w = endotheliumThickness
 
         # The empty connectivity matrix
-        ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes, self.nNodes+self.mesh.nCellsTotal()), dtype=np.int8)
+        ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes(), self.nNodes()+self.mesh.nCellsTotal), dtype=np.int8)
                                           
-        for i, n1, n2, data in enumerate(self.G.edges(data=True)):
+        for n1, n2, data in self.G.edges(data=True):
             
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
             r,l = data['radius'], data['length']
@@ -156,15 +157,15 @@ class VascularNetwork(object):
                                    for z in range(cellMin[2], cellMax[2]+1)]:
                 # Assign new label
                 HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
-
+                
+                # Add to connectivity matrix if the cell label changed from tissue to endothelial
                 if HasUpdatedValue and newLabel==2:
-                    # Add to connectivity matrix if the cell label changed from tissue to endothelial
-                    ConnVascNodesToEndothelialCells[n1, self.mesh.3DToFlatIndex(cellId)] =  1
+                    ConnVascNodesToEndothelialCells[n1, self.mesh.ToFlatIndexFrom3D(cellId)] =  1
             # Add connectivity of the vascular node to itself
             ConnVascNodesToEndothelialCells[n1, n1] = -1
                     
         print("Labelling successfully completed.")
-        return ConnVascNodesToEndothelialCells
+        return ConnVascNodesToEndothelialCells.tocsr()
         
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
                                cellId : tuple, endotheliumThickness : float):
@@ -209,7 +210,7 @@ class VascularNetwork(object):
             H = np.linalg.norm(v2)
             c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
             d = H * (1-c*c)**0.5
-        assert isclose(d, old_d), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
+        assert isclose(d, old_d, rel_tol=1e-5), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
 
         if (d < r - endotheliumThickness/2.0):
             otherLabel = 1
@@ -261,9 +262,6 @@ class VascularNetwork(object):
 
         return
             
-            
-            
-        return
     def Repartition(self, maxDist=1):
         '''
         Split vessels so that end nodes are at most maxDist cells away
@@ -347,7 +345,7 @@ class VascularNetwork(object):
         ## TODO: add the plasma skimming effect
 
         # Update the incidence matrix in case splitting has occured
-        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).toarray().T
+        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T
         
         ## Resistance matrix
         R = []
@@ -402,13 +400,19 @@ class VascularNetwork(object):
             D[nodeOutlets] = 1.0
 
             print(f'Using {self.pDist/133.3224}mmHg as outlet pressure.')
-        D = np.diag(D)
-        I = np.identity(D.shape[0])
+
+        D = sp.dia_array(sp.diags(D), dtype=np.float32)
+        I = sp.dia_array(sp.identity(D.shape[0]), dtype=np.float32)
         
-        self.Flow_matrix = np.block([
-            [R, -self.C],
-            [(I-D).dot(self.C.T), D]
-            ])
+        # self.Flow_matrix = np.block([
+        #     [R, -self.C],
+        #     [(I-D).dot(self.C.T), D]
+        #     ])
+
+        self.Flow_matrix = sp.vstack([sp.hstack([R, -self.C], dtype=np.float32),
+                                      sp.hstack([(I-D) @ self.C.T, D])],
+                                     format='csr', dtype=np.float32)
+
         self.Flow_rhs    = np.concatenate([np.zeros(self.nVessels()),
                                            (I-D).dot(qBar) + D.dot(pBar)])
         
@@ -419,7 +423,7 @@ class VascularNetwork(object):
         if (self.Flow_matrix is None) or (self.Flow_rhs is None):
             raise ValueError("Linear system has not been set yet.")
 
-        x = solve(self.Flow_matrix, self.Flow_rhs)
+        x = scipy.sparse.linalg.spsolve(self.Flow_matrix, self.Flow_rhs)
         f,p = x[:self.nVessels()], x[self.nVessels():]
         dp  = self.C.dot(p)
 
@@ -430,9 +434,17 @@ class VascularNetwork(object):
         # Compute error of the solver
         self.Flow_loss = self.C.T.dot(f).sum()
         print(f"Flow loss (C*f).sum() = {self.Flow_loss} with q_in={f.max()}.")
-
-        for i,e in enumerate(self.G.edges()):
-            self.G[e[0]][e[1]].update(flow=f[i], dp=dp[i])
+        self.Flow_loss = 0
+        for i,e in enumerate(self.G.edges()): # Add the flow to vessel data
+            n1, n2 = e
+            self.G[n1][n2].update(flow=f[i], dp=dp[i])
+            if not self.G.pred[n1]:
+                # An inlet
+                self.Flow_loss += f[i]
+            elif not self.G.succ[n2]:
+                # An outlet
+                self.Flow_loss -= f[i]
+        print(f"Flow loss f_in-f_out = {self.Flow_loss}")
         
         return f,p,dp
     
@@ -494,7 +506,6 @@ class VascularNetwork(object):
         self._pDist = newValue
 
         
-
     def nNodes(self):
         return self.G.number_of_nodes()
     def nVessels(self):
