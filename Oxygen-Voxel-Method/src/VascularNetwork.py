@@ -7,6 +7,7 @@ from Mesh import UniformGrid
 from scipy.linalg import solve
 from math import isclose
 from NDSparseMatrix import NDSparseMatrix
+import scipy.sparse as sp
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -32,8 +33,8 @@ class VascularNetwork(object):
        
     Methods:
     --------
-    LabelMesh(endotheliumThickness, repartition=True, returnIntravascularConnectivity=False)
-        Labels the mesh according to the vascular vessel. Spliting of the vessel segments is performed prior to labelling unless specified otherwise.
+    LabelMesh(endotheliumThickness, repartition=True)
+        Labels the mesh according to the vascular vessel. 
     MeshToVTK(VTKFileName)
         Saves the mesh in .vtk legacy format.
     VesselsToVTK(VTKFileName)
@@ -104,8 +105,8 @@ class VascularNetwork(object):
         self.Flow_matrix = self.Flow_rhs = None
         self.Flow_loss = None
 
-    def LabelMesh(self, endotheliumThickness : float, repartition :bool=True, returnIntravascularConnectivity:bool=False):
-        """Labels the tissue surrounding the vessels. 
+    def LabelMesh(self, endotheliumThickness : float, repartition :bool=True):
+        """Labels the tissue surrounding the vessels. Spliting of the vessel segments is performed prior to labelling unless specified otherwise.
 
         Parameters
         ----------
@@ -119,27 +120,22 @@ class VascularNetwork(object):
         
         Returns
         -------
-        ConnVascNodesToEndothelialCells : NDSparseMatrix
+        ConnVascNodesToEndothelialCells : scipy.sparse_array
             The connectivity matrix of vascular nodes to endothelial cells.
-        ConnVascNodeToIntravascCells : NDSparseMatrix
-            The connectivity matrix of vascular cells
-
-        TODO: make the connectivity matrices networkx graphs.
         """
 
-        
+
         if repartition:
             self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
         # self.mesh.labels = 0
         self.mesh.labels.EmptyMatrix()
         self.w = endotheliumThickness
 
-        # The empty connectivity matrices
-        ConnVascNodesToEndothelialCells = NDSparseMatrix(size=(self.nNodes, self.nNodes+self.mesh.nCellsTotal()), defaultValue = 0)
-        if returnIntravascularConnectivity:
-            ConnVascNodeToIntravascCells = NDSparseMatrix(size=(self.nNodes, self.nNodes+self.mesh.nCellsTotal()), defaultValue = 0)
+        # The empty connectivity matrix
+        ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes, self.nNodes+self.mesh.nCellsTotal()), dtype=np.int8)
                                           
         for i, n1, n2, data in enumerate(self.G.edges(data=True)):
+            
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
             r,l = data['radius'], data['length']
             vectorDirection = (p1-p2)/l # Unit vector (direction)
@@ -163,19 +159,13 @@ class VascularNetwork(object):
 
                 if HasUpdatedValue and newLabel==2:
                     # Add to connectivity matrix if the cell label changed from tissue to endothelial
-                    ConnVascNodesToEndothelialCells.addValue( (i, self.mesh.3DToFlatIndex(cellId)), 1)
-                elif returnIntravascularConnectivity and HasUpdatedValue and newLabel==1:
-                    # Add to connectivity matrix if the cell label changed from tissue or endothelial to vascular
-                    ConnVascNodeToIntravascCells.addValue( (i,self.mesh.3DToFlatIndex(cellId)), 1 )
-                
-                
+                    ConnVascNodesToEndothelialCells[n1, self.mesh.3DToFlatIndex(cellId)] =  1
+            # Add connectivity of the vascular node to itself
+            ConnVascNodesToEndothelialCells[n1, n1] = -1
+                    
         print("Labelling successfully completed.")
-
-        if returnIntravascularConnectivity:
-            return ConnVascNodesToEndothelialCells, ConnVascNodeToIntravascCells
-        else:
-            return ConnVascNodesToEndothelialCells
-
+        return ConnVascNodesToEndothelialCells
+        
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
                                cellId : tuple, endotheliumThickness : float):
         """
