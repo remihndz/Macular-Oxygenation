@@ -9,7 +9,8 @@ from NDSparseMatrix import NDSparseMatrix
 import scipy.sparse as sp
 import scipy.sparse.linalg
 import vtk
-from typing import Dict
+from typing import Dict, Union, Tuple, List
+import matplotlib.pylab as plt
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -106,6 +107,9 @@ class VascularNetwork(object):
         # Initialize linear system to None for error handling
         self.Flow_matrix = self.Flow_rhs = None
         self.Flow_loss = None
+        self.inletBC = {}
+        self.outletBC = {}
+        return
 
     def LabelMesh(self, endotheliumThickness : float, repartition :bool=True):
         """Labels the tissue surrounding the vessels. Spliting of the vessel segments is performed prior to labelling unless specified otherwise.
@@ -239,6 +243,8 @@ class VascularNetwork(object):
         # with list of radius
         lines = vtk.vtkCellArray()
         radius = vtk.vtkDoubleArray()
+        flow = vtk.vtkDoubleArray()
+        flow.SetName('flow')
         radius.SetName("radius")
         for n1, n2, data in self.G.edges(data=True):
             line = vtk.vtkLine()
@@ -246,11 +252,16 @@ class VascularNetwork(object):
             line.GetPointIds().SetId(1, n2)
             lines.InsertNextCell(line)
             radius.InsertNextValue(data['radius'])
+            try:
+                flow.InsertNextValue(data['flow'])
+            except:
+                flow.InsertNextValue(0.0)
 
         # Create the polydata
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(points)
         polydata.GetCellData().AddArray(radius)
+        polydata.GetCellData().AddArray(flow)
         polydata.SetLines(lines)
 
         # Write the polydata
@@ -333,7 +344,7 @@ class VascularNetwork(object):
         
         
 
-    def GetVesselData(self, keys : list, returnAList : bool = False):
+    def GetVesselData(self, keys : List[str], returnAList : bool = False):
         dataDict = dict()
         for key in keys:
             tmpContainer = []
@@ -344,7 +355,7 @@ class VascularNetwork(object):
             return dataDict.values()
         return dataDict
 
-    def SetLinearSystem(self, inletBC : Dict[str, float]={'pressure':50},
+    def SetLinearSystem(self, inletBC : Dict[str, float]={'pressure':100},
                         outletBC : Dict[str, float]={'pressure':26}):
         ## TODO: add the plasma skimming effect
         
@@ -357,8 +368,9 @@ class VascularNetwork(object):
             r = data['radius']
             l = data['length']
             mu = self.Viscosity(r, hd=data['hd']) * 1e-3 # Converts to Pa.s
+            self.G[n1][n2]['viscosity'] = mu
             R.append( (8*mu*l)/(np.pi*(r**4)))
-        R = np.diag(R)
+        R = sp.dia_array(([R], [0]), shape=(len(R), len(R)))
 
         ## Boundary conditions
 
@@ -366,18 +378,18 @@ class VascularNetwork(object):
         self.outletBC = outletBC
         unit = {'pressure':'mmHg', 'flow':self.units+'^3/s'}
         
-        nodeInlets = [x for x in self.G.nodes() if self.G.in_degree(x)==0]
-        nodeOutlets = [x for x in self.G.nodes() if self.G.out_degree(x)==0]
+        nodeInlets = self.inletNodes
+        nodeOutlets = self.outletNodes
         # print(f'{nodeInlets=}\n{nodeOutlets=}')
         
         D = np.zeros((self.nNodes(),)) # Decision matrix
         qBar = np.zeros((self.nNodes(),)) # RHS
         pBar = np.zeros((self.nNodes(),)) # RHS
 
-        # # Define inlet boundary condition
+        ## Define inlet boundary condition
     
         bcType, bcValue = next(iter(self.inletBC.items()))
-        print(f'\tInlet boundary condition is {bcValue}{unit[bcType]}')
+        print(f'\tInlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
         # bcType is checked to be 'pressure' or 'flow' in the setter function 
         if bcType=='pressure':
             bcValue *= 133.3224 # Assumes pressure was given in mmHg
@@ -385,32 +397,27 @@ class VascularNetwork(object):
             pBar[nodeInlets] = bcValue
         else:
             qBar[nodeInlets] = bcValue
-
+            
         # Define outlet boundary condition
         bcType, bcValue = next(iter(self.outletBC.items()))
-        print(f'\tOutlet boundary condition is {bcValue}{unit[bcType]}')
+        print(f'\tOutlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
         if bcType=='pressure':
             bcValue *= 133.3224 # Assumes pressure was given in mmHg
             D[nodeOutlets] = 1.0
             pBar[nodeOutlets] = bcValue
         else:
             qBar[nodeOutlets] = bcValue
-            
-        D = sp.dia_array(sp.diags(D), dtype=np.float32)
-        I = sp.dia_array(sp.identity(D.shape[0]), dtype=np.float32)
-        
-        # self.Flow_matrix = np.block([
-        #     [R, -self.C],
-        #     [(I-D).dot(self.C.T), D]
-        #     ])
 
+        D = sp.dia_array(([D],[0]), shape = (self.nNodes(), self.nNodes()),
+                         dtype=np.float32)
+        I = sp.dia_array(sp.eye(D.shape[0]), dtype=np.float32)        
+        
         self.Flow_matrix = sp.vstack([sp.hstack([R, -self.C], dtype=np.float32),
                                       sp.hstack([(I-D) @ self.C.T, D])],
                                      format='csr', dtype=np.float32)
 
         self.Flow_rhs    = np.concatenate([np.zeros(self.nVessels()),
                                            (I-D).dot(qBar) + D.dot(pBar)])
-        
         return
 
     def SolveFlow(self):
@@ -443,6 +450,44 @@ class VascularNetwork(object):
         
         return f,p,dp
     
+    @property
+    def inletBC(self):
+        return self._inletBC
+    @inletBC.setter
+    def inletBC(self, newInletBC : Dict[str,float]):
+        try:
+            bcType = next(iter(newInletBC.keys()))
+            if bcType in ['pressure', 'flow']:
+                self._inletBC = newInletBC
+            else:
+                raise KeyError(f"'{bcType}' is not a"
+                               "valid boundary condition type. "
+                               f"Valide types are: {['pressure','flow']}.")
+        except:
+            self._inletBC = None
+
+    @property
+    def inletNodes(self) -> List[int]:
+        return [x for x in self.G.nodes() if self.G.in_degree(x)==0]
+    @property
+    def outletNodes(self) -> List[int]:
+        return [x for x in self.G.nodes() if self.G.out_degree(x)==0]
+
+    @property
+    def outletBC(self):
+        return self._outletBC
+    @outletBC.setter
+    def outletBC(self, newOutletBC : Dict[str,float]):
+        try:
+            bcType = next(iter(newOutletBC.keys()))
+            if bcType in ['pressure', 'flow']:
+                self._outletBC = newOutletBC
+            else:
+                raise KeyError(f"'{bcType}' is not a"
+                               "valid boundary condition type. "
+                               f"Valide types are: {['pressure','flow']}.")
+        except:
+            self._outletBC = None
 
     @property
     def Flow_matrix(self):
@@ -622,3 +667,12 @@ class VascularNetwork(object):
             return ( 1 + (mu045-1)*((1-hd)**C-1)/((1-0.45)**C-1) )
         
 
+    def __str__(self):
+        return f"""
+        Vessels:
+            Number of nodes: {self.nNodes()}
+            Number of segments: {self.nVessels()}
+            Bounding box: {[bb.tolist() for bb in self.BoundingBox()]}
+            Inlet boundary condition: {self.inletBC}
+            Outlet boudary condition: {self.outletBC}
+        """

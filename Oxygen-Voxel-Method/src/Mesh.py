@@ -2,7 +2,7 @@ from Cell import Cell
 import numpy as np
 from NDSparseMatrix import NDSparseMatrix # A custom sparse matrix storage. No mathematical operation implemented
 import vtk
-from typing import Union
+from typing import Union, Tuple, List
 
 class UniformGrid(object):
     """
@@ -78,14 +78,7 @@ class UniformGrid(object):
     def dimensions(self):
         return self._dimensions       
     @dimensions.setter
-    def dimensions(self, dims):
-        """FIXME! briefly describe function
-
-        :param dims: 
-        :returns: 
-        :rtype: 
-
-        """
+    def dimensions(self, dims : Union[Tuple[float], List[float], np.ndarray]):
         if np.all(np.array(dims) > 0.0) and np.array(dims).size==3:
             self._dimensions = np.array(dims).reshape((3,))
         else:
@@ -95,14 +88,7 @@ class UniformGrid(object):
     def origin(self):
         return self._origin          
     @origin.setter
-    def origin(self, orig):
-        """FIXME! briefly describe function
-
-        :param orig: 
-        :returns: 
-        :rtype: 
-
-        """
+    def origin(self, orig : Union[Tuple[float], List[float], np.ndarray]):
         if np.array(orig).size==3:
             self._origin = np.array(orig).reshape((3,))
         else:
@@ -113,14 +99,7 @@ class UniformGrid(object):
     def spacing(self):
         return self._spacing    
     @spacing.setter
-    def spacing(self, spac):
-        """FIXME! briefly describe function
-
-        :param spac: 
-        :returns: 
-        :rtype: 
-
-        """
+    def spacing(self, spac : Union[Tuple[float], List[float], np.ndarray]):
         if np.all(np.array(spac) > 0.0):
             if np.array(spac).size==3:
                 self._spacing = np.array(spac).reshape((3,))
@@ -158,7 +137,7 @@ class UniformGrid(object):
         self._labels = newLabels
         return
 
-    def SetLabelOfCell(self, newLabel : int, cellId : tuple):
+    def SetLabelOfCell(self, newLabel : int, cellId : Union[Tuple[int], List[int], np.ndarray]) -> bool:
         '''
         Returns False if labels[cellId] has not been updated.
         '''
@@ -174,17 +153,16 @@ class UniformGrid(object):
             self._labels.addValue(cellId, newLabel)
         return updateValue
 
-    def ToFlatIndexFrom3D(self, ijk : tuple):
+    def ToFlatIndexFrom3D(self, ijk : Union[Tuple[int], List[int], np.ndarray]) -> int:
         return self.nCells[0]*self.nCells[1]*ijk[2] + self.nCells[0]*ijk[1] + ijk[0]
 
-    def FlatIndexTo3D(self, idx : int):
+    def FlatIndexTo3D(self, idx : int) -> Tuple[int]:
         k = idx // (self.nCells[0]*self.nCells[1])
         j = (idx - k*self.nCells[0]*self.nCells[1]) // self.nCells[0]
         i = idx - self.nCells[0] * (j + self.nCells[1]*k)
         return (i,j,k)        
 
-
-    def IsInsideMesh(self, ijk : Union[tuple, np.ndarray]) ->bool:
+    def IsInsideMesh(self, ijk : Union[Tuple[int], List[int], np.ndarray]) -> bool:
         """Check if an (i,j,k) is a valid index for the mesh.
 
         Parameters
@@ -220,7 +198,7 @@ class UniformGrid(object):
             f"nCells={self.nCells}," \
             f"spacing={self.spacing})"
     
-    def PointToCell(self, X):
+    def PointToCell(self, X : Union[List[float], Tuple[float], np.ndarray]) -> np.ndarray:
         xarr = np.array(X).reshape((3,))
         if (np.any(xarr < self.origin) or np.any(xarr > self.origin + self.dimensions)):
             raise ValueError(f"Point {X.tolist()} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
@@ -228,7 +206,7 @@ class UniformGrid(object):
         xCentered = xarr - self.origin
         return np.floor(np.divide(xCentered, self.spacing)).astype(int)
     
-    def CellCenter(self, ijk):
+    def CellCenter(self, ijk : Union[np.ndarray, List[int], int, Tuple[int]]) -> np.ndarray:
         if isinstance(ijk, int):
             ijkarr = np.array(self.FlatIndexTo3D(ijk))
         else:
@@ -239,10 +217,12 @@ class UniformGrid(object):
         return cellCenter
 
     @staticmethod
-    def Dist(cell1, cell2):
+    def Dist(cell1 : Union[List[int], Tuple[int], np.ndarray],
+             cell2 : Union[List[int], Tuple[int], np.ndarray]) -> int:
         return int(np.sum(np.abs(np.array(cell1)-np.array(cell2))))
 
-    def _BoundingBoxOfVessel(self, p1, p2, r):
+    def _BoundingBoxOfVessel(self, p1 : np.ndarray, p2 : np.ndarray,
+                             r : float) -> Tuple[np.ndarray, np.ndarray]:
         '''
         Finds the bounding box for the vessel with end points p1 and p2
         in cell coordinates (i,j,k indices).
@@ -257,13 +237,12 @@ class UniformGrid(object):
         cellMin, cellMax = self.PointToCell(bboxes.min(axis=0)), self.PointToCell(bboxes.max(axis=0))
         return cellMin, cellMax
 
-    def ToNumpy(self):
+    def ToNumpy(self) -> np.ndarray:
         arr = np.zeros((self.nCells))
         for i,j,k in [(x,y,z) for z in range(self.nCells[2])
                       for y in range(self.nCells[1])
                       for x in range(self.nCells[0])]:
             arr[i,j,k] = self.labels[(i,j,k)]
-
         return arr
         
     

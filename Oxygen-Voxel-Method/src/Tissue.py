@@ -2,6 +2,7 @@ from VascularNetwork import VascularNetwork
 # from Mesh import UniformGrid
 import networkx as nx
 import scipy.sparse as sp
+import scipy.sparse.linalg
 from typing import Union
 import numpy as np
 from typing import Dict
@@ -74,7 +75,7 @@ class Tissue(object):
         else:
             raise ValueError("Provide either a VascularNetwork' or a valid .cco file.")
 
-        self.CellToSegment = self.Vessels.LabelMesh(self.endotheliumThickness)
+        self.CellToSegment = self.Vessels.LabelMesh(self.endotheliumThickness)        
         return
 
     # Various useful property getters
@@ -261,15 +262,19 @@ class Tissue(object):
         """
 
         print("Assembling the right-hand-side vector", end='....')
-        self.rhs = sp.dok_array((self.nPoints+self.nVol,), dtype=np.float32)
+        self.rhs = sp.dok_array((self.nPoints+self.nVol,1), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             if not self.Vessels.G.pred[node]:
                 # No parent found
-                self.RHS[node] = cv
+                self.rhs[node,0] = cv
         # NOTE: the no-flux BC for tissue does not add anything to the rhs
         print(' Done.')
         return
 
+    def Solve(self) -> sp._arrays.csr_array:
+        x = scipy.sparse.linalg.spsolve(self.A, self.rhs)
+        return x
+    
     def VesselsToVTK(self, VTKFileName : str):
         self.Vessels.VesselsToVTK(VTKFileName)
         return
