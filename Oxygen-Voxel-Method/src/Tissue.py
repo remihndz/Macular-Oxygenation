@@ -4,6 +4,7 @@ import networkx as nx
 import scipy.sparse as sp
 from typing import Union
 import numpy as np
+from typing import Dict
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -24,17 +25,10 @@ class Tissue(object):
         The number of vascular nodes in Vessels.
     nSeg : int
         The number of vascular segments in Vessels.
-    Mc : scipy.sparse._arrays
-        Matrix discretizing the O2 convection in vessels.
-    Md : scipy.sparse._arrays
-        Matrix discretizing the O2 diffusion in tissue.
-    Gamma : scipy.sparse._arrays
-        Matrix of the endothelium-to-tissue mass transfer flux balance.
-    R : scipy.sparse._arrays
-        Diagonal matrix of the (constant) reaction rates and cuboid volume.
-    rhs : scipy.sparse._arrays
+    A : scipy.sparse.sparse_array
+    rhs : scipy.sparse.sparse_array
         The right hand side of the equation. Includes boundary conditions.
-    CellToSegment : scipy.sparse._arrays
+    CellToSegment : scipy.sparse.sparse_array
         The connectivity matrix between cells and their associated vascular segments.
     
     Methods:
@@ -42,13 +36,11 @@ class Tissue(object):
     ImportVessels(ccoFileName)
         Reads the vascular network to be used from a .cco file.
     MakeMassTransfer()
-        Assembles the matrix Gamma of mass transfer flux balance.
-    MakeDiffusion()
-        Assembles the matrix Md of the O2 diffusion in tissue.
+        Add the vessel-endothelium mass transfer terms to the system.
+    MakeReactionDiffusion(D, kt)
+        Add reaction-diffusion terms to the overall system.
     MakeConvection(**kwargs)
-        Assembles the matrix Mc of the O2 convection in vessels.
-    MakeReaction()
-        Assembles the diagonal matrix R of oxygen consumption in tissue.
+        Add O2 convection in the vessels to the system.
     MakeRHS(**kwargs)
         Assembles the RHS according to boundary conditions in **kwargs.
     """
@@ -85,7 +77,7 @@ class Tissue(object):
         self.CellToSegment = self.Vessels.LabelMesh(self.endotheliumThickness)
         return
 
-    # Various attribute getters
+    # Various useful property getters
     @property
     def nx(self):
         return self.Vessels.mesh.nCells
@@ -156,7 +148,13 @@ class Tissue(object):
                      offsets=0, format='csr', dtype=np.float32)
         M = self.CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
         M = M @ self.CellToSegment
-        self.Mc = M
+        
+        M = M.tocsr()
+        try:
+            self.A -= M
+        except:
+            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A = -M
         print(' Done.')
         return
 
@@ -199,12 +197,17 @@ class Tissue(object):
                 if cellLabel == 0:
                     M[cellFlatIndex, cellFlatIndex] -= kt*v
 
-        self.Md = M.tocsr()
-
+        M = M.tocsr()
+        try:
+            self.A[self.nPoints:, self.nPoints:] += M
+        except:
+            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A[self.nPoints:, self.nPoints:] = M
         print(' Done.')
         return
     
-    def MakeConvection(self, **kwargs):
+    def MakeConvection(self, inletBC : Dict[str, float]={'pressure':50},
+                       outletBC : Dict[str, float]={'pressure':26}):
         """Assembles the discretization of the convection problem in vessels.
 
         The convection operator -div(f.c_v) is discretized using an
@@ -214,20 +217,11 @@ class Tissue(object):
         The method solves for blood flow in the vascular network.
         Boundary conditions and parameters can be specified as keyword arguments.
 
-        Keyword arguments
-        -----------------
-        qProx : float
-            Inlet blood flow.
-        qDist : float
-            Outlet blood flow.
-        pProx : float
-            Inlet blood pressure.
-        pDist : float
-            Outlet blood pressure.        
+
         """
 
         print("Assembling the convection matrix")
-        self.Vessels.SetLinearSystem(**kwargs)
+        self.Vessels.SetLinearSystem(inletBC, outletBC)
         self.Vessels.SolveFlow()
         M = sp.dok_array((self.nPoints, self.nPoints), dtype=np.float32)
         for node in self.Vessels.G.nodes():
@@ -244,7 +238,12 @@ class Tissue(object):
                     M[node, otherNode] = -flow/length
                     M[node, node] += flow/length
 
-        self.Mc = M.tocsr()
+        M = M.tocsr()
+        try:
+            self.A[:self.nPoints, :self.nPoints] += M
+        except:
+            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A[:self.nPoints, :self.nPoints] = M
         print('Done.')
         return
 
@@ -278,5 +277,6 @@ class Tissue(object):
     def MeshToVTK(self, VTKFileName : str):
         self.Vessels.MeshToVTK(VTKFileName)
         return
-        
+
+    
     

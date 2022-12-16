@@ -9,6 +9,7 @@ from NDSparseMatrix import NDSparseMatrix
 import scipy.sparse as sp
 import scipy.sparse.linalg
 import vtk
+from typing import Dict
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -332,18 +333,21 @@ class VascularNetwork(object):
         
         
 
-    def GetVesselData(self, keys : list):
+    def GetVesselData(self, keys : list, returnAList : bool = False):
         dataDict = dict()
         for key in keys:
             tmpContainer = []
             for n1, n2, data in self.G.edges.data():
                 tmpContainer.append(data.get(key, None))
             dataDict[key] = np.array(tmpContainer)
+        if returnAList:
+            return dataDict.values()
         return dataDict
 
-    def SetLinearSystem(self, **kwargs):
+    def SetLinearSystem(self, inletBC : Dict[str, float]={'pressure':50},
+                        outletBC : Dict[str, float]={'pressure':26}):
         ## TODO: add the plasma skimming effect
-
+        
         # Update the incidence matrix in case splitting has occured
         self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T
         
@@ -355,7 +359,12 @@ class VascularNetwork(object):
             mu = self.Viscosity(r, hd=data['hd']) * 1e-3 # Converts to Pa.s
             R.append( (8*mu*l)/(np.pi*(r**4)))
         R = np.diag(R)
+
         ## Boundary conditions
+
+        self.inletBC = inletBC
+        self.outletBC = outletBC
+        unit = {'pressure':'mmHg', 'flow':self.units+'^3/s'}
         
         nodeInlets = [x for x in self.G.nodes() if self.G.in_degree(x)==0]
         nodeOutlets = [x for x in self.G.nodes() if self.G.out_degree(x)==0]
@@ -365,42 +374,28 @@ class VascularNetwork(object):
         qBar = np.zeros((self.nNodes(),)) # RHS
         pBar = np.zeros((self.nNodes(),)) # RHS
 
-        # Define inlet boundary condition
-        if 'qProx' in kwargs:
-            # self.qProx = kwargs.get('qProx', # Default value is 15 muL/min
-            #                         15.0 * 1e9 / (60 * pow(self._lengthConversionDict['micron']
-            #                                                /self._lengthConversionDict[self.units], 3)))            
-            self.qProx = kwargs['qProx']
-            self.pProx = None
-            qBar[nodeInlets] = self.qProx
-
-            print(f'Using {self.qProx}{self.units}^3/s as inflow boundary condition.')
-
-        else:
-            self.qProx = None
-            self.pProx = kwargs.get('pProx', # Default value is 50mmHg
-                                    50 * 133.3224)
+        # # Define inlet boundary condition
+    
+        bcType, bcValue = next(iter(self.inletBC.items()))
+        print(f'\tInlet boundary condition is {bcValue}{unit[bcType]}')
+        # bcType is checked to be 'pressure' or 'flow' in the setter function 
+        if bcType=='pressure':
+            bcValue *= 133.3224 # Assumes pressure was given in mmHg
             D[nodeInlets] = 1.0
-            pBar[nodeInlets] = self.pProx
-            
-            print(f'Using {self.pProx/133.3224}mmHg as inlet pressure.')
+            pBar[nodeInlets] = bcValue
+        else:
+            qBar[nodeInlets] = bcValue
 
         # Define outlet boundary condition
-        if 'qDist' in kwargs:
-            self.qDist = kwargs['qDist']
-            self.pDist = None
-            qBar[nodeOutlets] = self.qDist
-            
-            print(f'Using {self.qProx}{self.units}^3/s as outflow boundary condition.')
-        else:
-            self.pDist = kwargs.get('pDist', # Default value is 25mmHg
-                                    25 * 133.3224)
-            self.qDist = None
-            pBar[nodeOutlets] = self.pDist
+        bcType, bcValue = next(iter(self.outletBC.items()))
+        print(f'\tOutlet boundary condition is {bcValue}{unit[bcType]}')
+        if bcType=='pressure':
+            bcValue *= 133.3224 # Assumes pressure was given in mmHg
             D[nodeOutlets] = 1.0
-
-            print(f'Using {self.pDist/133.3224}mmHg as outlet pressure.')
-
+            pBar[nodeOutlets] = bcValue
+        else:
+            qBar[nodeOutlets] = bcValue
+            
         D = sp.dia_array(sp.diags(D), dtype=np.float32)
         I = sp.dia_array(sp.identity(D.shape[0]), dtype=np.float32)
         
