@@ -94,6 +94,23 @@ class UniformGrid(object):
         else:
             raise ValueError("Please enter valid point for origin.")
 
+    @property
+    def LabelsDistribution(self):
+        count = self.nCellsTotal
+        count -= self.labels.nonzeros
+        distrib = {'Tissue':0, 'Intravascular':0, 'Endothelial':0}
+        distrib['Tissue'] = count
+        for label in self.labels.elements.values():
+            if label==1:
+                distrib['Intravascular'] +=1
+            elif label==2:
+                distrib['Endothelial'] +=1
+            else:
+                raise ValueError(f"Label '{label}' found in "
+                                 "the label matrix is not a correct"
+                                 " label.")
+        assert sum(distrib.values())==self.nCellsTotal, "The total cells found does not match the total number of cells."
+        return distrib
     
     @property
     def spacing(self):
@@ -247,6 +264,7 @@ class UniformGrid(object):
         
     
     def ToVTK(self, VTKFileName : str):
+
         '''
         Save the mesh with its label in vtk format for visualisation.
         '''        
@@ -271,5 +289,3 @@ class UniformGrid(object):
                 f.write(f"\n{int(self.labels[(i,j,k)])}")
         
         return     
-    
-

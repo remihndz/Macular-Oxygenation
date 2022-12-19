@@ -5,7 +5,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg
 from typing import Union
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -113,13 +113,16 @@ class Tissue(object):
         else:
             raise ValueError("Input 'newVessels' must be of type VascularNetwork.")
         return
+    @property
+    def Mesh(self):
+        return self._Vessels.mesh
     
     def ImportVessels(self, ccoFileName : str, endotheliumThickness : float = 1e-3):
         self.Vessels = VascularNetwork(ccoFileName, spacing=endotheliumThickness)
         self.Vessels.w = endotheliumThickness
         return
 
-    def MakeMassTransfer(self, U : float):
+    def MakeMassTransfer(self, U : float, saveIn : Optional[str] = None):
         """Assembles the mass transfer coefficients between vascular nodes and endothelial grid cells.
 
         The CellToSegment matrix is of the form [-I C], where -I links
@@ -130,6 +133,8 @@ class Tissue(object):
         ----------
         U : float
             Transmembrane permeability coefficient.
+        saveIn : str
+            Optional, saves the matrix in the file in .npz format.
         """
         
         print("Assembling the mass transfer coefficients matrix", end='....')
@@ -150,16 +155,21 @@ class Tissue(object):
         M = self.CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
         M = M @ self.CellToSegment
         
-        M = M.tocsr()
         try:
+            #print(type(A), type(M))
             self.A -= M
         except:
-            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
             self.A = -M
         print(' Done.')
+
+        if saveIn:
+            sp.save_npz(saveIn, M)
+        
         return
 
-    def MakeReactionDiffusion(self, D : float, kt : float):
+    def MakeReactionDiffusion(self, D : float, kt : float,
+                              saveIn : Optional[str] = None):
         """Assembles the Reaction-Diffusion matrix for tissue cells.
 
         Parameters
@@ -168,12 +178,14 @@ class Tissue(object):
             Oxygen diffusion coefficient in tissue.
         kt : float
             Oxygen consumption rates in tissue.
+        saveIn : str
+            Optional, saves the matrix in the file in .npz format.
 
         TODO: code the possibility for non-uniform grid.
         """
 
         print("Assembling the reaction-diffusion matrix", end='....')
-        M = sp.dok_array((self.nVol, self.nVol), dtype=np.float32)
+        M = sp.lil_array((self.nVol, self.nVol), dtype=np.float32)
         spacing = self.dx
         v = np.prod(spacing) # Volume of each cells
         nCells  = self.nx
@@ -198,36 +210,48 @@ class Tissue(object):
                 if cellLabel == 0:
                     M[cellFlatIndex, cellFlatIndex] -= kt*v
 
-        M = M.tocsr()
         try:
+            #print(type(self.A), type(M))
             self.A[self.nPoints:, self.nPoints:] += M
         except:
-            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
             self.A[self.nPoints:, self.nPoints:] = M
         print(' Done.')
+
+        if saveIn:
+            sp.save_npz(saveIn, M.tocsr())
         return
     
     def MakeConvection(self, inletBC : Dict[str, float]={'pressure':50},
-                       outletBC : Dict[str, float]={'pressure':26}):
-        """Assembles the discretization of the convection problem in vessels.
+                       outletBC : Dict[str, float]={'pressure':26},
+                       saveIn : Optional[str] = None):
+        """Assembles the convection matrix for intravascular transport of oxygen.
 
         The convection operator -div(f.c_v) is discretized using an
         upwind scheme. At vascular node i with links to j and k, the
         discretization reads:
         f_{i,j}(c_i-c_j)/l_{i,j} + f_{i,k}(c_i-c_k)/l_{i,k}.
         The method solves for blood flow in the vascular network.
-        Boundary conditions and parameters can be specified as keyword arguments.
+        Boundary conditions for the haemodynamics simulations
+        can be specified as dictionnaries {'pressure' or 'flow':value}.
 
-
+        Parameters
+        ----------
+        inletBC : Dict[str, float]
+            Inlet boundary condition, either 'pressure' or 'flow'.
+        outletBC : Dict[str, float]
+            Outlet boundary condition, either 'pressure' or 'flow'.
+        saveIn : str
+            Optional, saves the matrix in npz format.
         """
-
+        
         print("Assembling the convection matrix")
         self.Vessels.SetLinearSystem(inletBC, outletBC)
         self.Vessels.SolveFlow()
-        M = sp.dok_array((self.nPoints, self.nPoints), dtype=np.float32)
+        M = sp.lil_array((self.nPoints, self.nPoints), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             successors = self.Vessels.G.successors(node)
-            
+
             if not self.Vessels.G.pred[node]: 
                 # It is a inlet node
                 print(f"Inlet node equation is at row {node}")
@@ -237,18 +261,23 @@ class Tissue(object):
                     flow = self.Vessels.G[node][otherNode]['flow']
                     length = self.Vessels.G[node][otherNode]['length']
                     M[node, otherNode] = -flow/length
+                    M[otherNode, node] = flow/length
                     M[node, node] += flow/length
 
-        M = M.tocsr()
         try:
+            #print(type(A), type(M))
             self.A[:self.nPoints, :self.nPoints] += M
         except:
-            self.A = sp.csr_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
             self.A[:self.nPoints, :self.nPoints] = M
         print('Done.')
+
+        if saveIn:
+            sp.save_npz(saveIn, M.tocsr())
+
         return
 
-    def MakeRHS(self, cv : float):
+    def MakeRHS(self, cv : float, saveIn : Optional[str] = None):
         """Assembles the RHS.
 
         At the tissue boundary, no-flux conditions are applied. For
@@ -259,21 +288,28 @@ class Tissue(object):
         ----------
         cv : float
              Inlet concentration of blood oxygen.
+        saveIn : str
+            Optional, saves the matrix in npz format.
         """
 
         print("Assembling the right-hand-side vector", end='....')
-        self.rhs = sp.dok_array((self.nPoints+self.nVol,1), dtype=np.float32)
+        self.rhs = sp.lil_array((self.nPoints+self.nVol,1), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             if not self.Vessels.G.pred[node]:
                 # No parent found
                 self.rhs[node,0] = cv
         # NOTE: the no-flux BC for tissue does not add anything to the rhs
+        self.rhs = self.rhs.tocsr()
+        if saveIn:
+            sp.save_npz(saveIn, self.rhs)
         print(' Done.')
         return
 
     def Solve(self) -> sp._arrays.csr_array:
+        self.A = self.A.tocsr()
+        self.A.eliminate_zeros()
         x = scipy.sparse.linalg.spsolve(self.A, self.rhs)
-        return x
+        return x[:self.nPoints], x[self.nPoints:]
     
     def VesselsToVTK(self, VTKFileName : str):
         self.Vessels.VesselsToVTK(VTKFileName)
@@ -282,6 +318,3 @@ class Tissue(object):
     def MeshToVTK(self, VTKFileName : str):
         self.Vessels.MeshToVTK(VTKFileName)
         return
-
-    
-    
