@@ -5,7 +5,6 @@ import pandas as pd
 import networkx as nx
 from Mesh import UniformGrid
 from math import isclose
-from NDSparseMatrix import NDSparseMatrix
 import scipy.sparse as sp
 import scipy.sparse.linalg
 import vtk
@@ -206,16 +205,16 @@ class VascularNetwork(object):
 
         # print(f'{newLabel=}: {d=} {r=} {endotheliumThickness=}')
         
-        # Just a check
-        old_d = d
-        v1, v2 = p2-p1, cellCenter-p1
-        if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
-            d = 0
-        else:
-            H = np.linalg.norm(v2)
-            c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
-            d = H * (1-c*c)**0.5
-        assert isclose(d, old_d, rel_tol=1e-5), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
+        # # Just a check using another method
+        # old_d = d
+        # v1, v2 = p2-p1, cellCenter-p1
+        # if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
+        #     d = 0
+        # else:
+        #     H = np.linalg.norm(v2)
+        #     c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
+        #     d = H * (1-c*c)**0.5
+        # assert isclose(d, old_d, rel_tol=1e-5), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
 
         if (d < r - endotheliumThickness/2.0):
             otherLabel = 1
@@ -318,8 +317,8 @@ class VascularNetwork(object):
         '''
         ## Create new node
         newNode = self.nNodes()
-        # Should be an unused name
-        assert not newNode in list(self.G.nodes), f"Node name {newNode} already exists."
+        ## Should be an unused name
+        # assert not newNode in list(self.G.nodes), f"Node name {newNode} already exists."
 
         # Add the new node to the list of nodes
         newNodePos = (self.G.nodes[edge[0]]['position'] + self.G.nodes[edge[1]]['position'])/2.0
@@ -429,8 +428,8 @@ class VascularNetwork(object):
         f,p = x[:self.nVessels()], x[self.nVessels():]
         dp  = self.C.dot(p)
 
-        assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
-        assert p.size==self.nNodes(), f"Nodal pressure vector has wrong size. Expected {self.nNodes()} and got {p.size}."
+        # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
+        # assert p.size==self.nNodes(), f"Nodal pressure vector has wrong size. Expected {self.nNodes()} and got {p.size}."
 
 
         # Compute error of the solver

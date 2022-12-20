@@ -3,9 +3,10 @@ from VascularNetwork import VascularNetwork
 import networkx as nx
 import scipy.sparse as sp
 import scipy.sparse.linalg
-from typing import Union
+from NDSparseMatrix import SparseRowIndexer
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
+
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -26,10 +27,10 @@ class Tissue(object):
         The number of vascular nodes in Vessels.
     nSeg : int
         The number of vascular segments in Vessels.
-    A : scipy.sparse.sparse_array
-    rhs : scipy.sparse.sparse_array
+    A : scipy.sparse.sparse_matrix
+    rhs : scipy.sparse.sparse_matrix
         The right hand side of the equation. Includes boundary conditions.
-    CellToSegment : scipy.sparse.sparse_array
+    CellToSegment : scipy.sparse.sparse_matrix
         The connectivity matrix between cells and their associated vascular segments.
     
     Methods:
@@ -138,6 +139,7 @@ class Tissue(object):
         """
         
         print("Assembling the mass transfer coefficients matrix", end='....')
+        
         vesselData = self.Vessels.GetVesselData(['radius', 'length'])
         # Compute (curved) surface area of each vessel
         # as an estimate of the contact area between
@@ -154,17 +156,19 @@ class Tissue(object):
                      offsets=0, format='csr', dtype=np.float32)
         M = self.CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
         M = M @ self.CellToSegment
-        
+
+        if saveIn:
+            sp.save_npz(saveIn, M)
+
+        M = M.tolil()
         try:
             #print(type(A), type(M))
             self.A -= M
         except:
-            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
             self.A = -M
+            self.A = self.A.tolil()
+            print(f"After mass transfer, {type(self.A)=}")
         print(' Done.')
-
-        if saveIn:
-            sp.save_npz(saveIn, M)
         
         return
 
@@ -184,8 +188,16 @@ class Tissue(object):
         TODO: code the possibility for non-uniform grid.
         """
 
+        try:
+            def foo(x): # An empty function to test if A is defined
+                pass
+            foo(self.A)
+            print(type(self.A))
+        except AttributeError: # If A not defined
+            print("Initiating the matrix.")
+            self.A = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+        
         print("Assembling the reaction-diffusion matrix", end='....')
-        M = sp.lil_array((self.nVol, self.nVol), dtype=np.float32)
         spacing = self.dx
         v = np.prod(spacing) # Volume of each cells
         nCells  = self.nx
@@ -203,23 +215,25 @@ class Tissue(object):
                         if self.Vessels.mesh.IsInsideMesh(neighbour):
                             neighbourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
                             flux = D*spacing[m-1]*spacing[m-2]/spacing[m]
-                            M[cellFlatIndex, cellFlatIndex] -= flux
-                            M[cellFlatIndex, neighbourFlatIndex] = flux
+                            self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= flux
+                            self.A[self.nPoints+cellFlatIndex, self.nPoints+neighbourFlatIndex] = flux
 
                 # Add oxygen consumption if it is a tissue cell
                 if cellLabel == 0:
-                    M[cellFlatIndex, cellFlatIndex] -= kt*v
+                    self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= kt*v
 
-        try:
-            #print(type(self.A), type(M))
-            self.A[self.nPoints:, self.nPoints:] += M
-        except:
-            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
-            self.A[self.nPoints:, self.nPoints:] = M
+        ## This matrix is too big. Slicing a lil matrix densifies the matrix
+        ## which causes MemoryError for large matrices.
+        # try:
+        #     #print(type(self.A), type(M))
+        #     self.A[self.nPoints:, self.nPoints:] += M
+        # except:
+        #     self.A = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+        #     self.A[self.nPoints:, self.nPoints:] = M
         print(' Done.')
 
         if saveIn:
-            sp.save_npz(saveIn, M.tocsr())
+            sp.save_npz(saveIn, self.A.tocsr()[self.nPoints:, self.nPoints:])
         return
     
     def MakeConvection(self, inletBC : Dict[str, float]={'pressure':50},
@@ -248,32 +262,34 @@ class Tissue(object):
         print("Assembling the convection matrix")
         self.Vessels.SetLinearSystem(inletBC, outletBC)
         self.Vessels.SolveFlow()
-        M = sp.lil_array((self.nPoints, self.nPoints), dtype=np.float32)
+
+        try:
+            def foo(x): # An empty function to test if A is defined
+                pass
+            foo(self.A)
+        except AttributeError: # If A not defined
+            print("Initiating the matrix.")
+            self.A = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
+        
         for node in self.Vessels.G.nodes():
             successors = self.Vessels.G.successors(node)
 
             if not self.Vessels.G.pred[node]: 
                 # It is a inlet node
                 print(f"Inlet node equation is at row {node}")
-                M[node, node] = 1
+                self.A[node, node] = 1
             else:
                 for otherNode in successors:
                     flow = self.Vessels.G[node][otherNode]['flow']
                     length = self.Vessels.G[node][otherNode]['length']
-                    M[node, otherNode] = -flow/length
-                    M[otherNode, node] = flow/length
-                    M[node, node] += flow/length
+                    self.A[node, otherNode] = -flow/length
+                    self.A[otherNode, node] = flow/length
+                    self.A[node, node] += flow/length
 
-        try:
-            #print(type(A), type(M))
-            self.A[:self.nPoints, :self.nPoints] += M
-        except:
-            self.A = sp.lil_array((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
-            self.A[:self.nPoints, :self.nPoints] = M
         print('Done.')
 
         if saveIn:
-            sp.save_npz(saveIn, M.tocsr())
+            sp.save_npz(saveIn, self.A.tocsr()[:self.nPoints,:self.nPoints])
 
         return
 
@@ -293,7 +309,7 @@ class Tissue(object):
         """
 
         print("Assembling the right-hand-side vector", end='....')
-        self.rhs = sp.lil_array((self.nPoints+self.nVol,1), dtype=np.float32)
+        self.rhs = sp.lil_matrix((self.nPoints+self.nVol,1), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             if not self.Vessels.G.pred[node]:
                 # No parent found
@@ -305,9 +321,21 @@ class Tissue(object):
         print(' Done.')
         return
 
-    def Solve(self) -> sp._arrays.csr_array:
+    def Solve(self, checkForEmptyRows : bool=False):
         self.A = self.A.tocsr()
         self.A.eliminate_zeros()
+
+        if checkForEmptyRows:
+            # Slicing rows is not implemented yet for scipy sparse_arrays
+            # so we transform self.A into a sparse_matrix
+            self.A = sp.csr_matrix((self.A.data, self.A.indices, self.A.indptr),
+                                   shape = self.A.shape, dtype=np.float32) 
+            emptyRows = []            
+            for i in range(self.A.shape[0]):
+                if not list(self.A[i,:].data):
+                    emptyRows.append(i)
+            print(f"Found {len(emptyRows)} empty rows: {emptyRows}.")
+                    
         x = scipy.sparse.linalg.spsolve(self.A, self.rhs)
         return x[:self.nPoints], x[self.nPoints:]
     

@@ -5,16 +5,18 @@ import numpy as np
 from vtk.util import numpy_support
 import vtk 
 
-w = 1e-2 # 1 micron
+w = 1e-3 # 1 micron
 U = 2400*1e-5 # Permeability in mm^2/s
 
+vessels = VascularNetwork('1Vessel.cco', spacing = [1e-2, w*2, w*2])
+tissue = Tissue(Vessels = vessels)
 #tissue = Tissue(ccoFile='sim_19.cco', w=w) # Large-ish network
-tissue = Tissue(ccoFile='1Vessel.cco', w=w) # One vessel
+#tissue = Tissue(ccoFile='1Vessel.cco', w=w) # One vessel
 #tissue = Tissue(ccoFile='Patient1.cco', w=w)
 
-tissue.Vessels.SetLinearSystem(inletBC={'pressure':50},
-                               outletBC={'pressure':25})
-tissue.Vessels.SolveFlow()
+# tissue.Vessels.SetLinearSystem(inletBC={'pressure':50},
+#                                outletBC={'pressure':25})
+# tissue.Vessels.SolveFlow()
 
 tissue.VesselsToVTK('Vessels.vtp')
 tissue.MeshToVTK('LabelledMesh.vtk')
@@ -23,8 +25,8 @@ flow, radius, dp, mu, length = tissue.Vessels.GetVesselData(['flow', 'radius', '
                                                              'viscosity', 'length'],
                                                     returnAList=True)
 
-inletPressure = dp[tissue.Vessels.inletNodes]/133.3224
-outletPressure = dp[tissue.Vessels.outletNodes]/133.3224
+# inletPressure = dp[tissue.Vessels.inletNodes]/133.3224
+# outletPressure = dp[tissue.Vessels.outletNodes]/133.3224
 
 print(f'{tissue.nPoints=} {tissue.nSeg=}')
 
@@ -39,9 +41,9 @@ print(f'{tissue.nPoints=} {tissue.nSeg=}')
 # ax[1].plot(dp/133.3224) #, flow*8*length*mu/(np.pi*(radius**4)))
 # plt.show()
 
+tissue.MakeMassTransfer(U, saveIn='MassTransfer.npz')
 tissue.MakeReactionDiffusion(1, 1, saveIn='ReactionDiffusion.npz')
 tissue.MakeConvection(saveIn='Convection.npz')
-tissue.MakeMassTransfer(U, saveIn='MassTransfer.npz')
 tissue.MakeRHS(50, saveIn='rhs.npz')
 
 print("Mesh labels:", tissue.Mesh.LabelsDistribution, 'Total number of cells', tissue.Mesh.nCellsTotal)
@@ -53,7 +55,7 @@ print("Mesh labels:", tissue.Mesh.LabelsDistribution, 'Total number of cells', t
 # plt.savefig('OverallSystem.jpg', bbox_inches='tight')
 # plt.show()
 
-xVessels, xTissue = tissue.Solve()
+xVessels, xTissue = tissue.Solve(checkForEmptyRows = False)
 print(xVessels)
 # plt.plot(xVessels)
 # plt.show()

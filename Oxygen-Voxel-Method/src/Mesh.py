@@ -60,7 +60,7 @@ class UniformGrid(object):
             self.spacing = spac
 
         # self.labels = 0 # 0 for tissue, 1 for intravascular and 2 for endothelium
-        self.labels = NDSparseMatrix(size=self.nCells, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
+        self.labels = NDSparseMatrix(shape=self.nCells, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
 
         self.v = np.prod(self.spacing) # Volume of a cell.
         
@@ -261,13 +261,15 @@ class UniformGrid(object):
                       for x in range(self.nCells[0])]:
             arr[i,j,k] = self.labels[(i,j,k)]
         return arr
-        
-    
+            
     def ToVTK(self, VTKFileName : str):
+        """Save the mesh with its label in vtk format for visualisation.
 
-        '''
-        Save the mesh with its label in vtk format for visualisation.
-        '''        
+        Parameters
+        ----------
+        VTKFileName : str
+            File to store the labels.
+        """        
         with open(VTKFileName, 'w') as f:
             f.write("# vtk DataFile Version 3.0\n")
             f.write("A mesh for the computation of oxygen perfusion.\n")
