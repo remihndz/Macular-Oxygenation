@@ -202,25 +202,66 @@ class Tissue(object):
         v = np.prod(spacing) # Volume of each cells
         nCells  = self.nx
         dx,dy,dz = spacing
-        for cellFlatIndex in range(self.nVol):
-            cell3DIndex = np.array(self.Vessels.mesh.FlatIndexTo3D(cellFlatIndex))
-            cellLabel = self.labels[(ind for ind in cell3DIndex)]
 
-            if cellLabel in [0,2]: # Diffusion does not happen in intravascular elements
-                # Add the flux of each face.
-                # Flux is 0 on boundary faces.
-                for m in range(3):
-                    for n in [-1, 1]:
-                        neighbour = cell3DIndex + np.array([n if l==m else 0 for l in range(3)])
-                        if self.Vessels.mesh.IsInsideMesh(neighbour):
-                            neighbourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
-                            flux = D*spacing[m-1]*spacing[m-2]/spacing[m]
-                            self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= flux
-                            self.A[self.nPoints+cellFlatIndex, self.nPoints+neighbourFlatIndex] = flux
+        coeffs = [dy*dz/dx, dx*dz/dy, dx*dy/dz,           # Lower diagonals
+                  -2*(dy*dz/dx+dx*dz/dy+dx*dy/dz) - kt*v, # Main diagonal
+                  dy*dz/dx, dx*dz/dy, dx*dy/dz]           # Upper diagonals
+        offsets = [-nCells[0]*nCells[1], -nCells[1], -1,  # Lower diagonals
+                   0,                                     # Main diagonal
+                   nCells[0]*nCells[1], nCells[1], 1]     # Upper diagonals
+        
+        M = sp.diags(coeffs, offsets, shape=(self.nVol, self.nVol), format='lil')
+        removeRows = []
+        for index3D, label in self.labels.elements.items():
+            cellFlatId = self.Vessels.mesh.ToFlatIndexFrom3D(index3D)
+            if label==1:
+                removeRows.append(cellFlatId)
+            elif index3D[0] == 0:
+                M[cellFlatId, cellFlatId] += coeffs[2]
+            elif index3D[0] == nCells[0]-1:
+                M[cellFlatId, cellFlatId] += coeffs[4]
+            if index3D[1] == 0:
+                M[cellFlatId, cellFlatId] += coeffs[1]                
+            elif index3D[1] == nCells[1]-1:
+                M[cellFlatId, cellFlatId] += coeffs[5]
+            if index3D[2] == 0:
+                M[cellFlatId, cellFlatId] += coeffs[0]                
+            elif index3D[2] == nCells[2]-1:
+                M[cellFlatId, cellFlatId] += coeffs[6]
 
-                # Add oxygen consumption if it is a tissue cell
-                if cellLabel == 0:
-                    self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= kt*v
+        M = M.tocsr()
+        deleteRowsOrCols = sp.eye(self.nVol, format='lil')
+        for row in removeRows:
+            deleteRowsOrCols[row,row] = 0
+        M = deleteRowsOrCols.dot(M) # Delete rows
+        M = M.dot(deleteRowsOrCols) # Delete cols
+        M = M.tolil()
+
+        self.A = self.A.tocsr()
+        self.A[self.nPoints:, self.nPoints:] = M
+
+        if saveIn:
+            sp.save_npz(saveIn, M)
+
+        # for cellFlatIndex in range(self.nVol):
+        #     cell3DIndex = np.array(self.Vessels.mesh.FlatIndexTo3D(cellFlatIndex))
+        #     cellLabel = self.labels[(ind for ind in cell3DIndex)]
+
+        #     if cellLabel in [0,2]: # Diffusion does not happen in intravascular elements
+        #         # Add the flux of each face.
+        #         # Flux is 0 on boundary faces.
+        #         for m in range(3):
+        #             for n in [-1, 1]:
+        #                 neighbour = cell3DIndex + np.array([n if l==m else 0 for l in range(3)])
+        #                 if self.Vessels.mesh.IsInsideMesh(neighbour):
+        #                     neighbourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
+        #                     flux = D*spacing[m-1]*spacing[m-2]/spacing[m]
+        #                     self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= flux
+        #                     self.A[self.nPoints+cellFlatIndex, self.nPoints+neighbourFlatIndex] = flux
+
+        #         # Add oxygen consumption if it is a tissue cell
+        #         if cellLabel == 0:
+        #             self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= kt*v
 
         ## This matrix is too big. Slicing a lil matrix densifies the matrix
         ## which causes MemoryError for large matrices.
@@ -232,8 +273,8 @@ class Tissue(object):
         #     self.A[self.nPoints:, self.nPoints:] = M
         print(' Done.')
 
-        if saveIn:
-            sp.save_npz(saveIn, self.A.tocsr()[self.nPoints:, self.nPoints:])
+        # if saveIn:
+        #     sp.save_npz(saveIn, self.A.tocsr()[self.nPoints:, self.nPoints:])
         return
     
     def MakeConvection(self, inletBC : Dict[str, float]={'pressure':50},
