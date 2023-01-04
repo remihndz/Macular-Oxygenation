@@ -199,42 +199,50 @@ class Tissue(object):
         print("Assembling the reaction-diffusion matrix", end='....')
         spacing = self.dx
         v = np.prod(spacing) # Volume of each cells
-        nCells  = self.nx
+        nx, ny, nz  = self.nx
         dx,dy,dz = spacing
 
+        # N.B.: this coefficients correspond to a discretization of the Laplacian operator -div(D*grad(f))
         if method == 1:            
-            coeffs = [dy*dz/dx, dx*dz/dy, dx*dy/dz,           # Lower diagonals
-                      -2*(dy*dz/dx+dx*dz/dy+dx*dy/dz) - kt*v, # Main diagonal
-                      dy*dz/dx, dx*dz/dy, dx*dy/dz]           # Upper diagonals
-            offsets = [-nCells[0]*nCells[1], -nCells[1], -1,  # Lower diagonals
+            coeffs = [D*dy*dz/dx, D*dx*dz/dy, D*dx*dy/dz, # Lower diagonals
+                      0,        # Main diagonal, coeff is set below
+                      D*dy*dz/dx, D*dx*dz/dy, D*dx*dy/dz] # Upper diagonals
+            coeffs[3] = -sum(coeffs) - kt*v
+            offsets = [-nx*ny, -ny, -1,  # Lower diagonals
                        0,                                     # Main diagonal
-                       nCells[0]*nCells[1], nCells[1], 1]     # Upper diagonals
+                       nx*ny, ny, 1]     # Upper diagonals
             
-            M = sp.diags(coeffs, offsets, shape=(self.nVol, self.nVol), format='lil')
-            removeRows = []
+            M = sp.diags(coeffs, offsets, shape=(self.nVol, self.nVol), format='lil') 
+            deleteRowsOrCols = sp.eye(self.nVol, format='lil')
+            indexDeletedRows = []
             for index3D, label in self.labels.elements.items():
                 cellFlatId = self.Vessels.mesh.ToFlatIndexFrom3D(index3D)
                 if label==1:
-                    removeRows.append(cellFlatId)
+                    deleteRowsOrCols[cellFlatId, cellFlatId] = 0 # No diffusion in the vascular voxels
+                    indexDeletedRows.append(cellFlatId)
+                if label==2:
+                    M[cellFlatId, cellFlatId] += kt*v
                 elif index3D[0] == 0:
                     M[cellFlatId, cellFlatId] += coeffs[2]
-                elif index3D[0] == nCells[0]-1:
+                    if cellFlatId-1 >= 0:
+                        M[cellFlatId, cellFlatId-1] = 0.0 
+                elif index3D[0] == nx-1:
                     M[cellFlatId, cellFlatId] += coeffs[4]
+                    if cellFlatId+1 < M.shape[1]:
+                        M[cellFlatId, cellFlatId+1] = 0.0
                 if index3D[1] == 0:
-                    M[cellFlatId, cellFlatId] += coeffs[1]                
-                elif index3D[1] == nCells[1]-1:
+                    M[cellFlatId, cellFlatId] += coeffs[1]
+                elif index3D[1] == ny-1:
                     M[cellFlatId, cellFlatId] += coeffs[5]
                 if index3D[2] == 0:
                     M[cellFlatId, cellFlatId] += coeffs[0]                
-                elif index3D[2] == nCells[2]-1:
+                elif index3D[2] == nz-1:
                     M[cellFlatId, cellFlatId] += coeffs[6]
 
-            M = M.tocsr()
-            deleteRowsOrCols = sp.eye(self.nVol, format='lil')
-            for row in removeRows:
-                deleteRowsOrCols[row,row] = 0
             M = deleteRowsOrCols.dot(M) # Delete rows
-            # M = M.dot(deleteRowsOrCols) # Delete cols
+            for row in indexDeletedRows:
+                M[row,row] = 1.0    # Sets the equation to 
+            M = M.dot(deleteRowsOrCols) # Delete cols -> I don't think we need to do that?
 
             M = sp.vstack((sp.csr_matrix( (self.nPoints, self.nVol), dtype=np.float32), M))
             M = sp.hstack((sp.csr_matrix( (self.nVol+self.nPoints, self.nPoints), dtype=np.float32), M))

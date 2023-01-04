@@ -164,7 +164,7 @@ class VascularNetwork(object):
                 
                 # Add to connectivity matrix if the cell label changed from tissue to endothelial
                 if HasUpdatedValue and newLabel==2:
-                    ConnVascNodesToEndothelialCells[n1, self.mesh.ToFlatIndexFrom3D(cellId)] =  1
+                    ConnVascNodesToEndothelialCells[n1, self.nNodes+self.mesh.ToFlatIndexFrom3D(cellId)] =  1 
             # Add connectivity of the vascular node to itself
             ConnVascNodesToEndothelialCells[n1, n1] = -1
                     
