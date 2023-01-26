@@ -10,6 +10,8 @@ import scipy.sparse.linalg
 import vtk
 from typing import Dict, Union, Tuple, List
 import matplotlib.pylab as plt
+from tqdm import tqdm
+import multiprocessing
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -128,7 +130,7 @@ class VascularNetwork(object):
         ConnVascNodesToEndothelialCells : scipy.sparse_array
             The connectivity matrix of vascular nodes to endothelial cells.
         """
-
+        global _Label
 
         if repartition:
             self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
@@ -138,9 +140,9 @@ class VascularNetwork(object):
 
         # The empty connectivity matrix
         ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes(), self.nNodes()+self.mesh.nCellsTotal), dtype=np.int8)
-                                          
-        for n1, n2, data in self.G.edges(data=True):
-            
+
+        def _Label(n1,n2,data):
+
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
             r,l = data['radius'], data['length']
             vectorDirection = (p1-p2)/l # Unit vector (direction)
@@ -156,9 +158,9 @@ class VascularNetwork(object):
             p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
             cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
             # Iterate through the cells within the bounding box
-            for cellId in [(x,y,z) for x in range(cellMin[0], cellMax[0]+1)
+            for cellId in ((x,y,z) for x in range(cellMin[0], cellMax[0]+1)
                                    for y in range(cellMin[1], cellMax[1]+1)
-                                   for z in range(cellMin[2], cellMax[2]+1)]:
+                                   for z in range(cellMin[2], cellMax[2]+1)):
                 # Assign new label
                 HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
                 
@@ -167,8 +169,18 @@ class VascularNetwork(object):
                     ConnVascNodesToEndothelialCells[n1, self.nNodes()+self.mesh.ToFlatIndexFrom3D(cellId)] =  1 
             # Add connectivity of the vascular node to itself
             ConnVascNodesToEndothelialCells[n1, n1] = -1
-                    
-        print("Labelling successfully completed.")
+
+        # for n1, n2, data in tqdm(self.G.edges(data=True)):
+        pool_obj = multiprocessing.Pool(maxtasksperchild=1)
+        pool_obj.starmap(_Label, tqdm(self.G.edges(data=True), desc=f"Labelling in progress", total=self.nVessels()))
+        pool_obj.close()
+        pool_obj.join()
+        pool_obj = None
+
+        for label in self.mesh.labels:
+            if int(label)!=0:
+                print(label, type(label))
+
         return ConnVascNodesToEndothelialCells.tocsr()
         
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
@@ -196,10 +208,12 @@ class VascularNetwork(object):
         
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center
 
-        if (d < r - endotheliumThickness/2.0):
-            newLabel = 1
+        if (d > r - endotheliumThickness/2.0):
+            newLabel = 2
         elif (d < r+endotheliumThickness/2.0):
             newLabel = 2
+        elif (d < r):
+            newLabel=1
         else:
             newLabel = 0
 
@@ -245,7 +259,7 @@ class VascularNetwork(object):
         flow = vtk.vtkDoubleArray()
         flow.SetName('flow')
         radius.SetName("radius")
-        for n1, n2, data in self.G.edges(data=True):
+        for n1, n2, data in tqdm(self.G.edges(data=True), desc=f"Writing vessel data to {VTKFileName}"):
             line = vtk.vtkLine()
             line.GetPointIds().SetId(0, n1)
             line.GetPointIds().SetId(1, n2)

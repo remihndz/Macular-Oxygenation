@@ -9,12 +9,12 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spl
 from math import ceil
 
-w = 5e-3 # 1 micron
+w = 8e-2 # 1 micron
 U = 2400*1e-5 # Permeability in mm^2/s
 
-vessels = VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
-tissue = Tissue(Vessels = vessels)
-#tissue = Tissue(ccoFile='sim_19.cco', w=w) # Large-ish network
+#vessels = VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
+#tissue = Tissue(Vessels = vessels)
+tissue = Tissue(ccoFile='sim_19.cco', w=w) # Large-ish network
 #tissue = Tissue(ccoFile='1Vessel.cco', w=w) # One vessel
 #tissue = Tissue(ccoFile='Patient1.cco', w=w)
 
@@ -25,9 +25,9 @@ tissue = Tissue(Vessels = vessels)
 tissue.VesselsToVTK('Vessels.vtp')
 tissue.MeshToVTK('LabelledMesh.vtk')
 
-flow, radius, dp, mu, length = tissue.Vessels.GetVesselData(['flow', 'radius', 'dp',
-                                                             'viscosity', 'length'],
-                                                    returnAList=True)
+# flow, radius, dp, mu, length = tissue.Vessels.GetVesselData(['flow', 'radius', 'dp',
+#                                                              'viscosity', 'length'],
+#                                                     returnAList=True)
 
 # inletPressure = dp[tissue.Vessels.inletNodes]/133.3224
 # outletPressure = dp[tissue.Vessels.outletNodes]/133.3224
@@ -45,50 +45,50 @@ print(f'{tissue.nPoints=} {tissue.nSeg=}')
 # ax[1].plot(dp/133.3224) #, flow*8*length*mu/(np.pi*(radius**4)))
 # plt.show()
 
-#tissue.MakeMassTransfer(U, saveIn='MassTransfer.npz')
-tissue.MakeReactionDiffusion(1e6, 0, saveIn='ReactionDiffusion.npz')
-# plt.spy(tissue.A)
+# #tissue.MakeMassTransfer(U, saveIn='MassTransfer.npz')
+# tissue.MakeReactionDiffusion(1e6, 0, saveIn='ReactionDiffusion.npz')
+# # plt.spy(tissue.A)
+# # plt.show()
+
+# M = tissue.A[tissue.nPoints:, tissue.nPoints:]
+# # plt.spy(M)
+# # plt.show()
+# nx,ny,nz = tissue.nx
+
+# I = sp.eye(M.shape[0])
+# b = np.zeros(M.shape[0])
+# x = np.zeros(M.shape[0])
+# x[ceil(nx/2):ceil(3*nx/2)] = 1.50
+# sourceCells = []
+# for i in range(M.shape[0]):
+#     if M[i,i] == 0:
+#         M[i,i] = 1.0
+#         b[i]   = 1.50
+#         x[i] = 1.50
+#         sourceCells.append(i)
+
+# dt = 0.1
+# fig = plt.figure()
+
+# idx0 = tissue.Vessels.mesh.ToFlatIndexFrom3D(tissue.Vessels.mesh.PointToCell((-0.08, -0.08, 0.0)))
+# idx1 = tissue.Vessels.mesh.ToFlatIndexFrom3D(tissue.Vessels.mesh.PointToCell((0.18, 0.08, 0.0)))
+# idx0 = 0
+# idx1 = 5*nx
+
+# xim = x[idx0:idx1].reshape((tissue.nx[0], -1))
+# plt.imshow(xim)
+# plt.colorbar()
 # plt.show()
+# K = I - dt*M
+# for k in range(50):
+#     x = spl.spsolve(K, x)
+#     print(x.min(), x.max(), x.mean())
 
-M = tissue.A[tissue.nPoints:, tissue.nPoints:]
-# plt.spy(M)
+# xim = x[idx0:idx1].reshape((tissue.nx[0], -1))
+# plt.imshow(xim)
+# plt.colorbar()
 # plt.show()
-nx,ny,nz = tissue.nx
-
-I = sp.eye(M.shape[0])
-b = np.zeros(M.shape[0])
-x = np.zeros(M.shape[0])
-x[ceil(nx/2):ceil(3*nx/2)] = 1.50
-sourceCells = []
-for i in range(M.shape[0]):
-    if M[i,i] == 0:
-        M[i,i] = 1.0
-        b[i]   = 1.50
-        x[i] = 1.50
-        sourceCells.append(i)
-
-dt = 0.1
-fig = plt.figure()
-
-idx0 = tissue.Vessels.mesh.ToFlatIndexFrom3D(tissue.Vessels.mesh.PointToCell((-0.08, -0.08, 0.0)))
-idx1 = tissue.Vessels.mesh.ToFlatIndexFrom3D(tissue.Vessels.mesh.PointToCell((0.18, 0.08, 0.0)))
-idx0 = 0
-idx1 = 5*nx
-
-xim = x[idx0:idx1].reshape((tissue.nx[0], -1))
-plt.imshow(xim)
-plt.colorbar()
-plt.show()
-K = I + dt*M
-for k in range(50):
-    x = spl.spsolve(K, x)
-    print(x.min(), x.max(), x.mean())
-
-xim = x[idx0:idx1].reshape((tissue.nx[0], -1))
-plt.imshow(xim)
-plt.colorbar()
-plt.show()
-print(x.min(), x.max(), x.mean())
+# print(x.min(), x.max(), x.mean())
 
 
 

@@ -3,6 +3,7 @@ import numpy as np
 from NDSparseMatrix import NDSparseMatrix # A custom sparse matrix storage. No mathematical operation implemented
 import vtk
 from typing import Union, Tuple, List
+from tqdm import tqdm
 
 class UniformGrid(object):
     """
@@ -168,6 +169,7 @@ class UniformGrid(object):
             updateValue = True
         if updateValue:
             self._labels.addValue(cellId, newLabel)
+
         return updateValue
 
     def ToFlatIndexFrom3D(self, ijk : Union[Tuple[int], List[int], np.ndarray]) -> int:
@@ -207,7 +209,7 @@ class UniformGrid(object):
             Number of cells: {self.nCells}
             Spacing: {self.spacing}
             Total number of cells: {self.nCellsTotal}
-        """
+            """
 
     def __repr__(self):
         return f"UniformGrid(dimensions={self.dimensions}, " \
@@ -261,7 +263,8 @@ class UniformGrid(object):
                       for x in range(self.nCells[0])]:
             arr[i,j,k] = self.labels[(i,j,k)]
         return arr
-            
+
+
     def ToVTK(self, VTKFileName : str):
         """Save the mesh with its label in vtk format for visualisation.
 
@@ -269,7 +272,8 @@ class UniformGrid(object):
         ----------
         VTKFileName : str
             File to store the labels.
-        """        
+        """
+
         with open(VTKFileName, 'w') as f:
             f.write("# vtk DataFile Version 3.0\n")
             f.write("A mesh for the computation of oxygen perfusion.\n")
@@ -285,9 +289,6 @@ class UniformGrid(object):
             f.write(f"SCALARS labels int 1\n")
             f.write(f"LOOKUP_TABLE default")
 
-            for i,j,k in [(x,y,z) for z in range(self.nCells[2])
-                          for y in range(self.nCells[1])
-                          for x in range(self.nCells[0])]:
-                f.write(f"\n{int(self.labels[(i,j,k)])}")
-        
+            f.write("\n")
+            f.write("\n".join(tqdm(self.labels, desc=f"Writing labels to {VTKFileName}"))) #, total=self.nCellTotal)))        
         return     

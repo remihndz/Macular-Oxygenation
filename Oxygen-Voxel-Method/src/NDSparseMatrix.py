@@ -8,6 +8,8 @@ class NDSparseMatrix:
     self.shape = shape
     self.dim  = len(shape)
 
+    self._count = 0 # Used to iter through the array
+
   def addValue(self, tuple, value):
     if value==self.defaultValue:
       return
@@ -47,8 +49,19 @@ class NDSparseMatrix:
   def dim(self, newDim):
     self._dim = int(newDim)
     return
-  
 
+  def __len__(self):
+    size = 1
+    for d in self.shape:
+      size *=d
+    return size
+  
+  def __iter__(self):
+    for k in range(self.shape[2]):
+      for j in range(self.shape[1]):
+        for i in range(self.shape[0]):
+          yield str(self.readValue((i,j,k)))
+  
 class SparseRowIndexer:
     def __init__(self, csr_matrix):
         data = []
