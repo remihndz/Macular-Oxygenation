@@ -258,9 +258,9 @@ class UniformGrid(object):
 
     def ToNumpy(self) -> np.ndarray:
         arr = np.zeros((self.nCells))
-        for i,j,k in [(x,y,z) for z in range(self.nCells[2])
+        for i,j,k in ((x,y,z) for z in range(self.nCells[2])
                       for y in range(self.nCells[1])
-                      for x in range(self.nCells[0])]:
+                      for x in range(self.nCells[0])):
             arr[i,j,k] = self.labels[(i,j,k)]
         return arr
 

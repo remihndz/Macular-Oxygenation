@@ -12,6 +12,7 @@ from typing import Dict, Union, Tuple, List
 import matplotlib.pylab as plt
 from tqdm import tqdm
 import multiprocessing
+import sys
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -141,8 +142,10 @@ class VascularNetwork(object):
         # The empty connectivity matrix
         ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes(), self.nNodes()+self.mesh.nCellsTotal), dtype=np.int8)
 
-        def _Label(n1,n2,data):
+        def _Label(edge, q):
 
+            n1,n2,data = edge
+            
             p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
             r,l = data['radius'], data['length']
             vectorDirection = (p1-p2)/l # Unit vector (direction)
@@ -163,6 +166,8 @@ class VascularNetwork(object):
                                    for z in range(cellMin[2], cellMax[2]+1)):
                 # Assign new label
                 HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
+                if HasUpdatedValue:
+                    q.put((cellId, newLabel))
                 
                 # Add to connectivity matrix if the cell label changed from tissue to endothelial
                 if HasUpdatedValue and newLabel==2:
@@ -171,16 +176,49 @@ class VascularNetwork(object):
             ConnVascNodesToEndothelialCells[n1, n1] = -1
 
         # for n1, n2, data in tqdm(self.G.edges(data=True)):
-        pool_obj = multiprocessing.Pool(maxtasksperchild=1)
-        pool_obj.starmap(_Label, tqdm(self.G.edges(data=True), desc=f"Labelling in progress", total=self.nVessels()))
-        pool_obj.close()
-        pool_obj.join()
-        pool_obj = None
 
-        for label in self.mesh.labels:
-            if int(label)!=0:
-                print(label, type(label))
+        m = multiprocessing.Manager()
+        q = m.Queue()
+        n_processes = 5#multiprocessing.cpu_count()
 
+        
+        with multiprocessing.Pool(n_processes) as pool:
+            #chunksize=int(self.nVessels()/n_processes)
+            chunksize = 1 # Allows for progressbar, may be slower
+
+            pool.starmap(_Label, tqdm(((edge, q) for edge in self.G.edges(data=True)),
+                                      desc="Labelling in progress",
+                                      total=self.nVessels()),
+                         chunksize=chunksize)
+            print("Child processes' work over.")
+            pool.close()
+            pool.join()
+        # pool_obj = multiprocessing.Pool(1,maxtasksperchild=1)
+        # pool_obj.starmap(_Label, tqdm(edges, desc=f"Labelling in progress", total=self.nVessels()))
+        # pool_obj.close()            
+        # pool_obj.join()
+        # pool_obj = None
+
+        q.put(None)
+        for item in tqdm(iter(q.get, None), total=q.qsize(), desc="Writing the labels"):
+            cellId, label = item
+            if label==0 or (label==2 and self.mesh.labels[cellId]==1):
+                pass
+            else:
+                self.mesh.labels.addValue(cellId, label)
+        
+        #count = 0 
+        # while not q.empty():
+        #     cellId, label = q.get()
+        #     if label==0 or (label==2 and self.mesh.labels[cellId]==1):
+        #         pass
+        #     else:
+        #         self.mesh.labels.addValue(cellId, label)
+        #         sys.stdout.write("\rLabelled %i cells" % count)
+        #         sys.stdout.flush()
+        #     count+=1
+        
+        
         return ConnVascNodesToEndothelialCells.tocsr()
         
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
@@ -208,12 +246,10 @@ class VascularNetwork(object):
         
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center
 
-        if (d > r - endotheliumThickness/2.0):
-            newLabel = 2
+        if (d < r - endotheliumThickness/2.0):
+            newLabel = 1
         elif (d < r+endotheliumThickness/2.0):
             newLabel = 2
-        elif (d < r):
-            newLabel=1
         else:
             newLabel = 0
 

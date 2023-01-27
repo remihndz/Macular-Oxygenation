@@ -9,7 +9,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spl
 from math import ceil
 
-w = 8e-2 # 1 micron
+w = 1e-2 # 1 micron
 U = 2400*1e-5 # Permeability in mm^2/s
 
 #vessels = VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
