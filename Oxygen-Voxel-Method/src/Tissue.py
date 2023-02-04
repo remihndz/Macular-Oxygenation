@@ -6,7 +6,10 @@ import scipy.sparse.linalg
 from NDSparseMatrix import SparseRowIndexer
 import numpy as np
 from typing import Dict, Optional, Union
-
+# from sparse_dot_mkl import sparse_qr_solve_mkl
+from petsc4py import PETSc
+import matplotlib.pyplot as plt
+from time import time
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -66,17 +69,19 @@ class Tissue(object):
         Vessels = kwargs.get('Vessels', False)
         ccoFile = kwargs.get('ccoFile', False)
         endotheliumThickness = kwargs.get('w', 1e-3)
+        dimensions = kwargs.get('dimensions', None)
+        spacing    = kwargs.get('spacing', 3*[endotheliumThickness])
         if Vessels:
             self.Vessels = Vessels
             self.Vessels.w = endotheliumThickness
         elif ccoFile:
             print(f"Reading vascular network from '{ccoFile}'.")
-            self.ImportVessels(ccoFile, endotheliumThickness)
+            self.ImportVessels(ccoFile, **kwargs)
             print(f'Labeling mesh with wall thickness {endotheliumThickness}mm.')
         else:
             raise ValueError("Provide either a VascularNetwork' or a valid .cco file.")
 
-        self.CellToSegment = self.Vessels.LabelMesh(self.endotheliumThickness)        
+        self.C3, self.C4, self.I4 = self.Vessels.LabelMesh(self.endotheliumThickness)
         return
 
     # Various useful property getters
@@ -118,8 +123,10 @@ class Tissue(object):
     def Mesh(self):
         return self._Vessels.mesh
     
-    def ImportVessels(self, ccoFileName : str, endotheliumThickness : float = 1e-3):
-        self.Vessels = VascularNetwork(ccoFileName, spacing=endotheliumThickness)
+    def ImportVessels(self, ccoFileName : str, endotheliumThickness : float = 1e-3, **kwargs):
+        ccoFile = kwargs.pop('ccoFile', None)
+        units = kwargs.pop('units', 'mm')
+        self.Vessels = VascularNetwork(ccoFileName, units, **kwargs)
         self.Vessels.w = endotheliumThickness
         return
 
@@ -137,9 +144,9 @@ class Tissue(object):
         saveIn : str
             Optional, saves the matrix in the file in .npz format.
         """
-        
+
         print("Assembling the mass transfer coefficients matrix", end='....')
-        
+            
         vesselData = self.Vessels.GetVesselData(['radius', 'length'])
         # Compute (curved) surface area of each vessel
         # as an estimate of the contact area between
@@ -149,31 +156,42 @@ class Tissue(object):
         # namely the number of 1s in a row -1 for
         # the column corresponding to the node itself.
 
-        # A = 2*np.pi*vesselData['radius']*vesselData['length']/( self.CellToSegment.sum(axis=1) - 1 )
-        A = vesselData['radius'].max()*vesselData['length'].max()*( self.CellToSegment.sum(axis=1)-1 )
-        # del A
-        M = sp.diags(A*U/self.endotheliumThickness,
+        Gamma = np.ones(self.nPoints, dtype=np.float32)*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
+        # This might not be necessary because the connectivty matrix between endothelial and nodes
+        # links endothelial cells with the end node of a segment (i.e., the inlet nodes are never connected).
+        # Gamma[self.Vessels.inletNodes] = 0.0 # No mass exchange with the inlet nodes.
+        
+        M = sp.diags(Gamma*U/self.endotheliumThickness,
                      offsets=0, format='csr', dtype=np.float32)
-        M = self.CellToSegment.T @ M # Here @ is the matrix-matrix product for scipy sparse_arrays
-        M = M @ self.CellToSegment
+        sp.save_npz("Gamma.npz", M)
+        del Gamma
+        # M = self.C3[1:,1:].T.dot(M.dot(self.C3[1:, 1:]))
+        M = self.C3.T.dot(M.dot(self.C3))
+        # M = self.CellToSegment.T @ M @ self.CellToSegment # Here @ is the matrix-matrix product for scipy sparse_arrays
+        
+        # Add the equations linking vascular cells with vascular nodes
+        M = M + sp.vstack([sp.csr_matrix((self.nPoints, self.nPoints+self.nVol)), sp.hstack([-self.C4, self.I4])])
+        
+        del self.C4
+        del self.C3
+        del self.I4
 
         if saveIn:
             sp.save_npz(saveIn, M)
 
-        M = M.tolil()
-        try:
-            #print(type(A), type(M))
-            self.A -= M
-        except:
-            self.A = -M
-            self.A = self.A.tolil()
-            print(f"After mass transfer, {type(self.A)=}")
-        print(' Done.')
-        
+        try:                                                                                 
+            def foo(x): # An empty function to test if A is defined                          
+                pass
+            foo(self.A)
+            self.A = self.A+M
+        except AttributeError: # If A not defined, create it                                 
+            self.A = M
+
+        print(' Done.')        
         return
 
     def MakeReactionDiffusion(self, D : float, kt : float,
-                              saveIn : Optional[str] = None, method=1):
+                              saveIn : Optional[str] = None, method=2):
         """Assembles the Reaction-Diffusion matrix for tissue cells.
 
         Parameters
@@ -187,97 +205,97 @@ class Tissue(object):
 
         TODO: code the possibility for non-uniform grid.
         """
-
-        try:
-            def foo(x): # An empty function to test if A is defined
-                pass
-            foo(self.A)
-        except AttributeError: # If A not defined, create it
-            print("Initiating the matrix.")
-            self.A = sp.csr_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
-        
         print("Assembling the reaction-diffusion matrix", end='....')
+                
         spacing = self.dx
-        v = np.prod(spacing) # Volume of each cells
-        nx, ny, nz  = self.nx
+        v = np.prod(self.Mesh.dimensions) # Dimensions of the slab of tissue 
+        nx, ny,nz  = self.nx
         dx,dy,dz = spacing
 
         # N.B.: this coefficients correspond to a discretization of the Laplacian operator -div(D*grad(f))
-        if method == 1:            
-            coeffs = [D*dy*dz/dx, D*dx*dz/dy, D*dx*dy/dz, # Lower diagonals
-                      0,        # Main diagonal, coeff is set below
-                      D*dy*dz/dx, D*dx*dz/dy, D*dx*dy/dz] # Upper diagonals
-            coeffs[3] = -sum(coeffs) - kt*v
-            offsets = [-nx*ny, -ny, -1,  # Lower diagonals
-                       0,                                     # Main diagonal
-                       nx*ny, ny, 1]     # Upper diagonals
+
+        coeffs = [D*dy*dx/dz, D*dx*dz/dy, D*dz*dy/dx, # Lower diagonals
+                  0,        # Main diagonal, coeff is set below
+                  D*dy*dx/dz, D*dx*dz/dy, D*dz*dy/dx] # Upper diagonals
+        coeffs[3] = -sum(coeffs)
+        offsets = [-nx*ny, -nx, -1,  # Lower diagonals
+                   0,                                     # Main diagonal
+                   nx*ny, nx, 1]     # Upper diagonals
+        if method == 1:
+
+            M = self.Mesh.MakePoissonWithNeumannBC(D)
+            DeleteCells = sp.eye(nx*ny*nz, format='lil')
             
-            M = sp.diags(coeffs, offsets, shape=(self.nVol, self.nVol), format='lil') 
-            deleteRowsOrCols = sp.eye(self.nVol, format='lil')
-            indexDeletedRows = []
+            offsets.pop(3)
+            coeffs.pop(3)
+            R = sp.eye(M.shape[0], format='lil') # The reaction term
             for index3D, label in self.labels.elements.items():
-                cellFlatId = self.Vessels.mesh.ToFlatIndexFrom3D(index3D)
+                flatId = self.Mesh.ToFlatIndexFrom3D(index3D)
+                R[flatId, flatId] = 0.0
                 if label==1:
-                    deleteRowsOrCols[cellFlatId, cellFlatId] = 0 # No diffusion in the vascular voxels
-                    indexDeletedRows.append(cellFlatId)
-                if label==2:
-                    M[cellFlatId, cellFlatId] += kt*v
-                elif index3D[0] == 0:
-                    M[cellFlatId, cellFlatId] += coeffs[2]
-                    if cellFlatId-1 >= 0:
-                        M[cellFlatId, cellFlatId-1] = 0.0 
-                elif index3D[0] == nx-1:
-                    M[cellFlatId, cellFlatId] += coeffs[4]
-                    if cellFlatId+1 < M.shape[1]:
-                        M[cellFlatId, cellFlatId+1] = 0.0
-                if index3D[1] == 0:
-                    M[cellFlatId, cellFlatId] += coeffs[1]
-                elif index3D[1] == ny-1:
-                    M[cellFlatId, cellFlatId] += coeffs[5]
-                if index3D[2] == 0:
-                    M[cellFlatId, cellFlatId] += coeffs[0]                
-                elif index3D[2] == nz-1:
-                    M[cellFlatId, cellFlatId] += coeffs[6]
-
-            M = deleteRowsOrCols.dot(M) # Delete rows
-            for row in indexDeletedRows:
-                M[row,row] = 1.0    # Sets the equation to 
-            M = M.dot(deleteRowsOrCols) # Delete cols -> I don't think we need to do that?
-
-            M = sp.vstack((sp.csr_matrix( (self.nPoints, self.nVol), dtype=np.float32), M))
-            M = sp.hstack((sp.csr_matrix( (self.nVol+self.nPoints, self.nPoints), dtype=np.float32), M))
-            print(f"{M.shape=}, {self.A.shape=}")
-            self.A -= M
-
+                    DeleteCells[flatId, flatId] = 0.0
+                    
+                    # Delete diffusion from vascular cells
+                    for neighbour, flux in zip((flatId + offset for offset in offsets), coeffs):
+                        M[neighbour, flatId] = 0.0
+                        M[neighbour, neighbour] += flux
+                        
+            M = -DeleteCells.dot(M) - R*kt*v
+            
             if saveIn:
                 sp.save_npz(saveIn, M)
 
-        else: # Much slower, 1.69s on average for mesh of size 166 000 vs 100ms for above method.
-            for cellFlatIndex in range(self.nVol):
-                cell3DIndex = np.array(self.Vessels.mesh.FlatIndexTo3D(cellFlatIndex))
-                cellLabel = self.labels[(ind for ind in cell3DIndex)]
-                
-                if cellLabel in [0,2]: # Diffusion does not happen in intravascular elements
-                    # Add the flux of each face.
-                    # Flux is 0 on boundary faces.
-                    for m in range(3):
-                        for n in [-1, 1]:
-                            neighbour = cell3DIndex + np.array([n if l==m else 0 for l in range(3)])
-                            if self.Vessels.mesh.IsInsideMesh(neighbour):
-                                neighbourFlatIndex = self.Vessels.mesh.ToFlatIndexFrom3D(neighbour)
-                                flux = D*spacing[m-1]*spacing[m-2]/spacing[m]
-                                self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= flux
-                                self.A[self.nPoints+cellFlatIndex, self.nPoints+neighbourFlatIndex] = flux
-                                
-                                # Add oxygen consumption if it is a tissue cell
-                                if cellLabel == 0:
-                                    self.A[self.nPoints+cellFlatIndex, self.nPoints+cellFlatIndex] -= kt*v
-                                    
-            # This matrix is too big. Slicing a lil matrix densifies the matrix
-            # which causes MemoryError for large matrices.
+            M = sp.vstack((sp.lil_matrix( (self.nPoints, self.nVol), dtype=np.float32), M)).tolil()
+            M = sp.hstack((sp.lil_matrix( (self.nVol+self.nPoints, self.nPoints), dtype=np.float32), M)).tolil()
+            try:
+                def foo(x): # An empty function to test if A is defined
+                    pass
+                foo(self.A)
+                self.A = self.A+M
+            except AttributeError: # If A not defined, create it
+                self.A = M
 
-            if saveIn:
-                sp.save_npz(saveIn, self.A.tocsr()[self.nPoints:, self.nPoints:])
+            del M
+            del DeleteCells
+                
+        if method == 2:
+
+            M = self.Mesh.MakePoissonWithNeumannBC_Kronecker(D)
+            # Adjust equations to account for internal vascular voxels (no diffusion nor reaction)
+            # and endothelial cells (no reaction)
+            DeleteCells = sp.eye(nx*ny*nz, format='lil')
+            R = sp.eye(M.shape[0], format='lil') # The reaction term
+            offsets.pop(3)
+            coeffs.pop(3)
+            for index3D, label in self.labels.elements.items():
+                flatId = self.Mesh.ToFlatIndexFrom3D(index3D)
+                R[flatId, flatId] = 0.0                               
+                if label==1:
+                    DeleteCells[flatId, flatId] = 0.0
+
+                    # Delete diffusion from vascular cells
+                    for neighbour, flux in zip((flatId + offset for offset in offsets), coeffs):
+                        M[neighbour, flatId] = 0.0
+                        M[neighbour, neighbour] += flux
+                        
+            M = -DeleteCells.dot(M) - R*kt*v
+                
+            M = sp.vstack((sp.lil_matrix( (self.nPoints, self.nVol), dtype=np.float32), M))
+            M = sp.hstack((sp.lil_matrix( (self.nVol+self.nPoints, self.nPoints), dtype=np.float32), M))
+
+            try:
+                def foo(x): # An empty function to test if A is defined
+                    pass
+                foo(self.A)
+            except AttributeError: # If A not defined, create it
+                self.A = M
+
+            del M            
+            del DeleteCells
+                           
+        if saveIn:
+            sp.save_npz(saveIn, self.A.tocsr()[self.nPoints:, self.nPoints:])
+
         print(' Done.')
         return
     
@@ -308,33 +326,37 @@ class Tissue(object):
         self.Vessels.SetLinearSystem(inletBC, outletBC)
         self.Vessels.SolveFlow()
 
-        try:
-            def foo(x): # An empty function to test if A is defined
-                pass
-            foo(self.A)
-        except AttributeError: # If A not defined
-            print("Initiating the matrix.")
-            self.A = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
-        
+        # Possible gain in time by going through inlet node (i.e., in_degree==0)
+        # then make another loop for the non inlets.
+        M = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
         for node in self.Vessels.G.nodes():
             successors = self.Vessels.G.successors(node)
-
+            
             if not self.Vessels.G.pred[node]: 
-                # It is a inlet node
+                # It is an inlet node
                 print(f"Inlet node equation is at row {node}")
-                self.A[node, node] = 1
-            else:
-                for otherNode in successors:
-                    flow = self.Vessels.G[node][otherNode]['flow']
-                    length = self.Vessels.G[node][otherNode]['length']
-                    self.A[node, otherNode] = -flow/length
-                    self.A[otherNode, node] = flow/length
-                    self.A[node, node] += flow/length
+                M[node, node] = 1
+            
+            for otherNode in successors:
+                flow = self.Vessels.G[node][otherNode]['flow']
+                length = self.Vessels.G[node][otherNode]['length']
+                # Upwind scheme?
+                M[otherNode, node] = -flow/length
+                M[otherNode, otherNode] = flow/length
 
         print('Done.')
 
         if saveIn:
-            sp.save_npz(saveIn, self.A.tocsr()[:self.nPoints,:self.nPoints])
+            sp.save_npz(saveIn, M.tocsr()[:self.nPoints,:self.nPoints])
+
+        try:
+            def foo(x): # An empty function to test if A is defined
+                pass
+            foo(self.A)
+            self.A = self.A + M
+        except AttributeError: # If A not defined
+            print("Initiating matrix self.A...")
+            self.A = M
 
         return
 
@@ -360,7 +382,7 @@ class Tissue(object):
                 # No parent found
                 self.rhs[node,0] = cv
         # NOTE: the no-flux BC for tissue does not add anything to the rhs
-        self.rhs = self.rhs.tocsr()
+        self.rhs = self.rhs.tocoo()
         if saveIn:
             sp.save_npz(saveIn, self.rhs)
         print(' Done.')
@@ -374,15 +396,70 @@ class Tissue(object):
             # Slicing rows is not implemented yet for scipy sparse_arrays
             # so we transform self.A into a sparse_matrix
             self.A = sp.csr_matrix((self.A.data, self.A.indices, self.A.indptr),
-                                   shape = self.A.shape, dtype=np.float32) 
+                                   shape = self.A.shape, dtype=float) 
             emptyRows = []            
             for i in range(self.A.shape[0]):
                 if not list(self.A[i,:].data):
                     emptyRows.append(i)
             print(f"Found {len(emptyRows)} empty rows: {emptyRows}.")
-                    
-        x = scipy.sparse.linalg.spsolve(self.A, self.rhs)
-        return x[:self.nPoints], x[self.nPoints:]
+            print("Their labels: ", [self.labels[self.Vessels.mesh.FlatIndexTo3D(cellFlatIndex-self.nPoints)] for cellFlatIndex in emptyRows])
+
+        t = time()
+        # print("Solving with scipy.sparse direct solver...")
+        # x = scipy.sparse.linalg.spsolve(self.A, self.rhs)
+
+        # This wrapper may be faster? Though no multi-threading
+        # It is also not working for some unknown reason...
+        # print("Solving with mkl solver...")
+        # b = self.rhs.toarray()[:,0].astype(np.float32)
+        # A = self.A.astype(np.float32)
+        # x = sparse_qr_solve_mkl(A, b)
+
+        # # Preconditioner
+        # print("Solving with gmres...", end='')
+        # print("\n\tMaking preconditioner (incomplete LU)")
+        # self.A = self.A.tocsc()
+        # ilu = scipy.sparse.linalg.spilu(self.A)
+        # M_x = lambda x: ilu.solve(x)
+        # n,m = self.A.shape
+        # M = scipy.sparse.linalg.LinearOperator((n,n), M_x)
+        # x, info = scipy.sparse.linalg.gmres(self.A, self.rhs.toarray(), M=M)
+        # print("gmrest exited with code:", info)
+
+        # Using PETSc
+        print("Solving with PETSc")
+        # Sanity check
+        if self.A.getformat() != 'csr':
+            self.A = self.A.tocsr()
+    
+        comm = PETSc.COMM_WORLD
+        petsc_mat = PETSc.Mat().createAIJ(size=self.A.shape,
+                                          csr=(self.A.indptr,
+                                               self.A.indices,
+                                               self.A.data), comm=comm)
+
+        ksp = PETSc.KSP().create(comm=comm)
+        ksp.setType('pgmres')
+        pc = ksp.getPC()
+        pc.setType('ilu')
+        ksp.setFromOptions()
+        ksp.setOperators(petsc_mat)
+        xpetsc = PETSc.Vec().create(comm=comm)
+        b = PETSc.Vec().createWithArray(self.rhs.toarray()[:,0], comm=comm)
+        xpetsc.setSizes(self.A.shape[0], None)
+        xpetsc.setUp()
+        ksp.solve(b, xpetsc)
+        x = xpetsc.getArray()
+        del ksp
+        del petsc_mat
+        del b
+        del xpetsc       
+        
+        print("Time for solver: ", time()-t)
+        return x[list(nx.topological_sort(self.Vessels.G))], x[self.nPoints:]
+                
+        
+        
     
     def VesselsToVTK(self, VTKFileName : str):
         self.Vessels.VesselsToVTK(VTKFileName)

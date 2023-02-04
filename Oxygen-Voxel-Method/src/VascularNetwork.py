@@ -91,16 +91,18 @@ class VascularNetwork(object):
         # Pad the cuboid with the radius of the larger vessel to
         # prevent having vessel cylinder outside the cuboid
         bb = self.BoundingBox()
+        print("Vessels' kwargs:", kwargs)
         maxRad = self.GetVesselData(['radius'])['radius'].max()
         minRad = self.GetVesselData(['radius'])['radius'].min()
         origin     = kwargs.get('origin', bb[0]) - 2*maxRad
         dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 4*maxRad
         spacing    = kwargs.get('spacing', [minRad/4]*3)
-        
+
         if dimensions[-1]==0:
             dimensions[-1] = 1
         nCells = kwargs.get('nCells', [20,20,20])
 
+        print(f"Creating mesh with {dimensions=}\n{origin=}\n{spacing=}")
         self.mesh = UniformGrid(dimensions = dimensions,
                                 origin = origin,
                                 nCells = nCells,
@@ -140,9 +142,9 @@ class VascularNetwork(object):
         self.w = endotheliumThickness
 
         # The empty connectivity matrix
-        ConnVascNodesToEndothelialCells = sp.dok_array((self.nNodes(), self.nNodes()+self.mesh.nCellsTotal), dtype=np.int8)
+        ConnVascNodesToEndothelialCells = sp.dok_array((self.nPoints, self.nPoints+self.nVol), dtype=np.int8)
 
-        def _Label(edge, q):
+        def _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells):
 
             n1,n2,data = edge
             
@@ -166,61 +168,120 @@ class VascularNetwork(object):
                                    for z in range(cellMin[2], cellMax[2]+1)):
                 # Assign new label
                 HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
-                if HasUpdatedValue:
-                    q.put((cellId, newLabel))
-                
                 # Add to connectivity matrix if the cell label changed from tissue to endothelial
-                if HasUpdatedValue and newLabel==2:
-                    ConnVascNodesToEndothelialCells[n1, self.nNodes()+self.mesh.ToFlatIndexFrom3D(cellId)] =  1 
-            # Add connectivity of the vascular node to itself
-            ConnVascNodesToEndothelialCells[n1, n1] = -1
+                if HasUpdatedValue:
+                    if self.mesh.labels[cellId]==1:
+                        VascularCellsToNodes[self.mesh.ToFlatIndexFrom3D(cellId), n2] = 1
+                        NodesToVascularCells[self.mesh.ToFlatIndexFrom3D(cellId)] = 1
+                    if self.mesh.labels[cellId]==2:
+                        NodesToEndothelialCells[n2, self.nNodes()+self.mesh.ToFlatIndexFrom3D(cellId)] = 1 
+                
+        def _Label(edge, qLabel, qEndothlial, qVascular):
+            
+            n1,n2,data = edge
+            
+            p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
+            r,l = data['radius'], data['length']
+            vectorDirection = (p1-p2)/l # Unit vector (direction)
 
-        # for n1, n2, data in tqdm(self.G.edges(data=True)):
+            l_new, l_old = np.linalg.norm(p1-p2), l
+            if not l_new == l_old: f"The length stored in the graph's edge data is incorrect: {l_old=} {l_new=} for vessel {(n1,n2)=}: {self.G.nodes[n1]=}, {self.G.nodes[n2]=}."
+            P = np.outer(vectorDirection, vectorDirection) # Matrix of the orthogonal projection onto the vessel axis
+            O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
 
-        m = multiprocessing.Manager()
-        q = m.Queue()
-        n_processes = 5#multiprocessing.cpu_count()
+            ## Find the bounding box
+            # To ensure full enclosure of the vessel, the bounding box is should
+            # bound the vessel extended by its radius in each direction
+            p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
+            cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
+            # Iterate through the cells within the bounding box
+            for cellId in ((x,y,z) for x in range(cellMin[0], cellMax[0]+1)
+                                   for y in range(cellMin[1], cellMax[1]+1)
+                                   for z in range(cellMin[2], cellMax[2]+1)):
+                # Assign new label
+                HasUpdatedValue, newLabel = self._LabelCellWithCylinder(O, p1, p2, r, cellId, endotheliumThickness)
+                if HasUpdatedValue:
+                    qLabel.put((cellId, newLabel))
+                    if newLabel==2:
+                        qEndothelial.put((n1, self.mesh.ToFlatIndexFrom3D(cellId)))
+                    elif newLabel==1:
+                        qVascular.put((n1, self.mesh.ToFlatIndexFrom3D(cellId)))
 
-        
-        with multiprocessing.Pool(n_processes) as pool:
-            #chunksize=int(self.nVessels()/n_processes)
-            chunksize = 1 # Allows for progressbar, may be slower
 
-            pool.starmap(_Label, tqdm(((edge, q) for edge in self.G.edges(data=True)),
-                                      desc="Labelling in progress",
-                                      total=self.nVessels()),
-                         chunksize=chunksize)
-            print("Child processes' work over.")
-            pool.close()
-            pool.join()
-        # pool_obj = multiprocessing.Pool(1,maxtasksperchild=1)
-        # pool_obj.starmap(_Label, tqdm(edges, desc=f"Labelling in progress", total=self.nVessels()))
-        # pool_obj.close()            
-        # pool_obj.join()
-        # pool_obj = None
+        n_processes = 1#multiprocessing.cpu_count()
 
-        q.put(None)
-        for item in tqdm(iter(q.get, None), total=q.qsize(), desc="Writing the labels"):
-            cellId, label = item
-            if label==0 or (label==2 and self.mesh.labels[cellId]==1):
-                pass
-            else:
-                self.mesh.labels.addValue(cellId, label)
+        """
+        TODO:
+        Fix the multiprocessing routine:
+            when writing the connectivity matrices their is
+            a mismatch in the processors' outputs (maybe) which
+            causes the endothelial cells to be linked to many
+            cells.
+            Potential fix, run through the endothelial cells
+            and link it to its vascular cell neighbour.
+            Advantage is that it could be done in parallel.
+        """     
+        if n_processes > 1:
+
+            print(f"Labelling with multiprocessing and {n_processes} processes.")
+            m = multiprocessing.Manager()
+            qLabel = m.Queue()
+            qEndothelial = m.Queue()
+            qVascular = m.Queue()
         
-        #count = 0 
-        # while not q.empty():
-        #     cellId, label = q.get()
-        #     if label==0 or (label==2 and self.mesh.labels[cellId]==1):
-        #         pass
-        #     else:
-        #         self.mesh.labels.addValue(cellId, label)
-        #         sys.stdout.write("\rLabelled %i cells" % count)
-        #         sys.stdout.flush()
-        #     count+=1
-        
-        
-        return ConnVascNodesToEndothelialCells.tocsr()
-        
+            with multiprocessing.Pool(n_processes) as pool:
+                #chunksize=int(self.nVessels()/n_processes)
+                chunksize = 1 # Allows for progressbar, may be slower
+                
+                pool.starmap(_Label, tqdm(((edge, qLabel, qEndothelial, qVascular) for edge in self.G.edges(data=True)),
+                                          desc="Labelling in progress",
+                                          total=self.nVessels()),
+                             chunksize=chunksize)
+                
+                qLabel.put(None)
+                qEndothelial.put(None)
+                qVascular.put(None)
+                for item in tqdm(iter(qLabel.get, None), total=qLabel.qsize(), desc="Writing the labels"):
+                    
+                    cellId, label = item
+                    if label==0 or (label==2 and self.mesh.labels[cellId]==1):
+                        pass
+                    else:
+                        self.mesh.labels.addValue(cellId, label)
+
+                NodesToEndothelialCells = sp.diags([-1], [0], shape=(self.nPoints, self.nVol + self.nNodes()), format='lil')
+                for item in tqdm(iter(qEndothelial.get, None), total=qEndothelial.qsize(), desc="Writing endothelial cells to vascular nodes connectivity."):
+                    node, cellId = item
+                    # Sanity check
+                    if self.mesh.labels[self.mesh.FlatIndexTo3D(cellId)]==2:
+                        NodesToEndothelialCells[node, self.nNodes()+cellId] = 1 
+                    
+                VascularCellsToNodes = sp.lil_matrix((self.nVol, self.nPoints))
+                NodesToVascularCells = np.zeros(self.nVol)
+                for item in tqdm(iter(qVascular.get, None), total=qVascular.qsize(), desc="Writing vascular cells to vascular nodes connectivity."):
+                    # Sanity check
+                    node, cellId = item
+                    if self.mesh.labels[self.mesh.FlatIndexTo3D(cellId)]==1:
+                        VascularCellsToNodes[cellId, node] = 1
+                        NodesToVascularCells[cellId] = 1
+
+                # Not sure if those two are necessary
+                pool.close()
+                pool.join()
+
+        else:
+            print("Labelling with 1 processor.")
+    
+            NodesToEndothelialCells = sp.diags([-1], [0], shape=(self.nPoints, self.nVol + self.nNodes()), format='lil')
+            VascularCellsToNodes = sp.lil_matrix((self.nVol, self.nPoints))
+            NodesToVascularCells = np.zeros(self.nVol)
+
+            for edge in tqdm((edge for edge in self.G.edges(data=True)), total=self.nVessels(), desc="Labelling in progress"):
+                _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells)             
+
+                
+        return NodesToEndothelialCells.tocsr(), VascularCellsToNodes.tocsr(), sp.diags([NodesToVascularCells], [0], format='csr')
+    
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
                                cellId : tuple, endotheliumThickness : float):
         """
@@ -248,7 +309,7 @@ class VascularNetwork(object):
 
         if (d < r - endotheliumThickness/2.0):
             newLabel = 1
-        elif (d < r+endotheliumThickness/2.0):
+        elif (d < r+ max(endotheliumThickness, min(self.mesh.spacing))/2.0):
             newLabel = 2
         else:
             newLabel = 0
@@ -284,7 +345,7 @@ class VascularNetwork(object):
     def VesselsToVTK(self, VTKFileName):
         # Create list of points (nodes)
         points = vtk.vtkPoints()
-        points.SetNumberOfPoints(self.nNodes())
+        points.SetNumberOfPoints(self.nPoints)
         for n, data in self.G.nodes(data=True):
             points.SetPoint(n, data['position'])
 
@@ -366,7 +427,7 @@ class VascularNetwork(object):
         edge is a tuple (n1,n2) of the nodes forming the segment.
         '''
         ## Create new node
-        newNode = self.nNodes()
+        newNode = self.nPoints
         ## Should be an unused name
         # assert not newNode in list(self.G.nodes), f"Node name {newNode} already exists."
 
@@ -431,9 +492,9 @@ class VascularNetwork(object):
         nodeOutlets = self.outletNodes
         # print(f'{nodeInlets=}\n{nodeOutlets=}')
         
-        D = np.zeros((self.nNodes(),)) # Decision matrix
-        qBar = np.zeros((self.nNodes(),)) # RHS
-        pBar = np.zeros((self.nNodes(),)) # RHS
+        D = np.zeros((self.nPoints,)) # Decision matrix
+        qBar = np.zeros((self.nPoints,)) # RHS
+        pBar = np.zeros((self.nPoints,)) # RHS
 
         ## Define inlet boundary condition
     
@@ -457,7 +518,7 @@ class VascularNetwork(object):
         else:
             qBar[nodeOutlets] = bcValue
 
-        D = sp.dia_array(([D],[0]), shape = (self.nNodes(), self.nNodes()),
+        D = sp.dia_array(([D],[0]), shape = (self.nPoints, self.nPoints),
                          dtype=np.float32)
         I = sp.dia_array(sp.eye(D.shape[0]), dtype=np.float32)        
         
@@ -475,11 +536,11 @@ class VascularNetwork(object):
             raise ValueError("Linear system has not been set yet.")
 
         x = scipy.sparse.linalg.spsolve(self.Flow_matrix, self.Flow_rhs)
-        f,p = x[:self.nVessels()], x[self.nVessels():]
+        f,p = x[:self.nVessels()]/60.0, x[self.nVessels():]
         dp  = self.C.dot(p)
 
         # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
-        # assert p.size==self.nNodes(), f"Nodal pressure vector has wrong size. Expected {self.nNodes()} and got {p.size}."
+        # assert p.size==self.nPoints, f"Nodal pressure vector has wrong size. Expected {self.nPoints} and got {p.size}."
 
 
         # Compute error of the solver
@@ -543,9 +604,9 @@ class VascularNetwork(object):
         return self._Flow_matrix
     @Flow_matrix.setter
     def Flow_matrix(self, newFlowMatrix):
-        if isinstance(newFlowMatrix, np.ndarray) and  newFlowMatrix.shape != (self.nVessels()+self.nNodes(),
-                                                            self.nVessels()+self.nNodes()):
-            raise ValueError(f"Flow matrix with shape {newFlowMatrix.shape} inconsistent with vascular network with {self.nVessels()} vessels and {self.nNodes()} nodes.")
+        if isinstance(newFlowMatrix, np.ndarray) and  newFlowMatrix.shape != (self.nVessels()+self.nPoints,
+                                                            self.nVessels()+self.nPoints):
+            raise ValueError(f"Flow matrix with shape {newFlowMatrix.shape} inconsistent with vascular network with {self.nVessels()} vessels and {self.nPoints} nodes.")
         self._Flow_matrix = newFlowMatrix
 
     @property
@@ -553,8 +614,8 @@ class VascularNetwork(object):
         return self._Flow_rhs
     @Flow_rhs.setter
     def Flow_rhs(self, newRHS):
-        if isinstance(newRHS, np.ndarray) and newRHS.shape[0] != self.nVessels()+self.nNodes():
-            raise ValueError(f"RHS with shape {newRHS.shape} inconsistent with vascular network with {self.nVessels()} vessels and {self.nNodes()} nodes.")
+        if isinstance(newRHS, np.ndarray) and newRHS.shape[0] != self.nVessels()+self.nPoints:
+            raise ValueError(f"RHS with shape {newRHS.shape} inconsistent with vascular network with {self.nVessels()} vessels and {self.nPoints} nodes.")
         self._Flow_rhs = newRHS
         
     @property
@@ -629,6 +690,13 @@ class VascularNetwork(object):
             raise KeyError(f"Wrong key '{newUnits}' for unit conversion. Valid keys are {self._lengthConversionDict.keys()}.")
         self._units = newUnits
 
+    @property
+    def nVol(self):
+        return self.mesh.nCellsTotal
+    @property
+    def nPoints(self):
+        return self.nNodes()
+    
 
     def BoundingBox(self):
         nodes = np.array([self.G.nodes[n]['position'] for n in self.G.nodes])
@@ -719,7 +787,7 @@ class VascularNetwork(object):
     def __str__(self):
         return f"""
         Vessels:
-            Number of nodes: {self.nNodes()}
+            Number of nodes: {self.nPoints}
             Number of segments: {self.nVessels()}
             Bounding box: {[bb.tolist() for bb in self.BoundingBox()]}
             Inlet boundary condition: {self.inletBC}

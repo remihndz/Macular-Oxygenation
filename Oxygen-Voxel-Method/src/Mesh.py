@@ -4,6 +4,7 @@ from NDSparseMatrix import NDSparseMatrix # A custom sparse matrix storage. No m
 import vtk
 from typing import Union, Tuple, List
 from tqdm import tqdm
+import scipy.sparse as sp
 
 class UniformGrid(object):
     """
@@ -144,7 +145,7 @@ class UniformGrid(object):
     @property
     def nCellsTotal(self):
         return np.prod(self._nCells)            
-
+    
     @property
     def labels(self):
         return self._labels
@@ -292,3 +293,102 @@ class UniformGrid(object):
             f.write("\n")
             f.write("\n".join(tqdm(self.labels, desc=f"Writing labels to {VTKFileName}"))) #, total=self.nCellTotal)))        
         return     
+
+    def MakePoissonWithNeumannBC(self, D):
+        
+        nx,ny,nz = self.nCells
+        dx,dy,dz = self.spacing
+        
+        coeffs = [D/dz/dz, D/dy/dy, D/dx/dx, # Lower diagonals
+                  0,        # Main diagonal, coeff is set below
+                  D/dz/dz, D/dy/dy, D/dx/dx] # Upper diagonals
+        coeffs[3] = -sum(coeffs)
+        offsets = [-nx*ny, -nx, -1,  # Lower diagonals
+                   0,                                     # Main diagonal
+                   nx*ny, nx, 1]     # Upper diagonals
+
+        M = sp.diags(coeffs, offsets, shape=(self.nCellsTotal, self.nCellsTotal), format='lil')
+        
+        # Diffusion with homogeneous Neumann BC
+        nx,ny,nz = self.nCells
+        for k in range(nz):
+            for j in range(ny):
+                for i in range(nx):
+                    cellId = i + nx*j + nx*ny*k
+                    if i==0:
+                        if cellId-1>=0:
+                            M[cellId, cellId-1] = 0.0
+                        M[cellId, cellId+1] *= 2
+                    elif i==nx-1:
+                        if cellId+1<M.shape[1]:
+                            M[cellId, cellId+1] = 0.0
+                        M[cellId, cellId-1] *= 2
+                    if j==0:
+                        if cellId-nx>=0:
+                            M[cellId, cellId-nx] = 0.0
+                        M[cellId, cellId+nx] *= 2.0 
+                    elif j==ny-1:
+                        if cellId+nx<M.shape[1]:
+                            M[cellId, cellId+nx] = 0.0
+                        M[cellId, cellId-nx] *= 2.0
+                    if k==0:
+                        if cellId-nx*ny>=0:
+                            M[cellId, cellId-nx*ny] = 0.0
+                        M[cellId, cellId+nx*ny] *= 2.0
+                    elif k==nz-1:
+                        if cellId+nx*ny<M.shape[1]:
+                            M[cellId, cellId+nx*ny] = 0.0
+                        M[cellId, cellId-nx*ny] *= 2.0
+                        
+        return M.tolil()  # Return -div(Dgrad)
+
+    def MakePoissonWithNeumannBC_Kronecker(self, D):
+
+        # Uses the Kronecker representation to scale-up from 1D to 3D.
+        # Need to work-out on paper whether the coefficients are correct
+        # Should be OK if dx=dy=dz
+        # Update: not working. Maybe use it to build the symmetric matrix and
+        # add the BC manually. Or work out the math to see if that can be used directly
+        def Make1DDiffWithoutBC(nx, dx):
+            M = sp.diags([D/dx/dx, -2*D/dx/dx, D/dx/dx], [-1, 0, 1], shape=(nx,nx), format='lil')
+            return M
+
+        def Make3DFrom1DWithoutBC(n, h):
+            nx,ny,nz = n
+            dx,dy,dz = h
+            Dx, Dy, Dz = Make1DDiffWithoutBC(nx,dx), Make1DDiffWithoutBC(ny,dy), Make1DDiffWithoutBC(nz,dz)
+            return sp.kron(Dx, sp.eye(ny*nz)) + sp.kron(sp.eye(nx), sp.kron(Dy, sp.eye(nz))) + sp.kron(sp.eye(nx*ny), Dz)            
+    
+        M = Make3DFrom1DWithoutBC(self.nCells, self.spacing).tolil()
+        # Diffusion with homogeneous Neumann BC
+        nx,ny,nz = self.nCells
+        for k in range(nz):
+            for j in range(ny):
+                for i in range(nx):
+                    cellId = i + nx*j + nx*ny*k
+                    if i==0:
+                        if cellId-1>=0:
+                            M[cellId, cellId-1] = 0.0
+                        M[cellId, cellId+1] *= 2
+                    elif i==nx-1:
+                        if cellId+1<M.shape[1]:
+                            M[cellId, cellId+1] = 0.0
+                        M[cellId, cellId-1] *= 2
+                    if j==0:
+                        if cellId-nx>=0:
+                            M[cellId, cellId-nx] = 0.0
+                        M[cellId, cellId+nx] *= 2.0 
+                    elif j==ny-1:
+                        if cellId+nx<M.shape[1]:
+                            M[cellId, cellId+nx] = 0.0
+                        M[cellId, cellId-nx] *= 2.0
+                    if k==0:
+                        if cellId-nx*ny>=0:
+                            M[cellId, cellId-nx*ny] = 0.0
+                        M[cellId, cellId+nx*ny] *= 2.0
+                    elif k==nz-1:
+                        if cellId+nx*ny<M.shape[1]:
+                            M[cellId, cellId+nx*ny] = 0.0
+                        M[cellId, cellId-nx*ny] *= 2.0
+                                                
+        return M.tolil() # Return -div(Dgrad)
