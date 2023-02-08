@@ -73,14 +73,14 @@ class Tissue(object):
         spacing    = kwargs.get('spacing', 3*[endotheliumThickness])
         if Vessels:
             self.Vessels = Vessels
-            self.Vessels.w = endotheliumThickness
+            self.Vessels.w = endotheliumThickness 
         elif ccoFile:
             print(f"Reading vascular network from '{ccoFile}'.")
             self.ImportVessels(ccoFile, **kwargs)
             print(f'Labeling mesh with wall thickness {endotheliumThickness}mm.')
         else:
             raise ValueError("Provide either a VascularNetwork' or a valid .cco file.")
-
+        
         self.C3, self.C4, self.I4 = self.Vessels.LabelMesh(self.endotheliumThickness)
         return
 
@@ -163,7 +163,7 @@ class Tissue(object):
         
         M = sp.diags(Gamma*U/self.endotheliumThickness,
                      offsets=0, format='csr', dtype=np.float32)
-        sp.save_npz("Gamma.npz", M)
+    
         del Gamma
         # M = self.C3[1:,1:].T.dot(M.dot(self.C3[1:, 1:]))
         M = self.C3.T.dot(M.dot(self.C3))
@@ -178,6 +178,7 @@ class Tissue(object):
 
         if saveIn:
             sp.save_npz(saveIn, M)
+            sp.save_npz(saveIn[:-4]+"_Gamma.npz", M)
 
         try:                                                                                 
             def foo(x): # An empty function to test if A is defined                          
@@ -206,7 +207,8 @@ class Tissue(object):
         TODO: code the possibility for non-uniform grid.
         """
         print("Assembling the reaction-diffusion matrix", end='....')
-                
+        print(f"\n\tReaction rate {kt=}")
+        print(f"\tDiffusion rate {D=}")
         spacing = self.dx
         v = np.prod(self.Mesh.dimensions) # Dimensions of the slab of tissue 
         nx, ny,nz  = self.nx
@@ -214,13 +216,14 @@ class Tissue(object):
 
         # N.B.: this coefficients correspond to a discretization of the Laplacian operator -div(D*grad(f))
 
-        coeffs = [D*dy*dx/dz, D*dx*dz/dy, D*dz*dy/dx, # Lower diagonals
+        coeffs = [D/dz/dz, D/dy/dy, D/dx/dx, # Lower diagonals
                   0,        # Main diagonal, coeff is set below
-                  D*dy*dx/dz, D*dx*dz/dy, D*dz*dy/dx] # Upper diagonals
+                  D/dz/dz, D/dy/dy, D/dx/dx] # Upper diagonals
         coeffs[3] = -sum(coeffs)
         offsets = [-nx*ny, -nx, -1,  # Lower diagonals
                    0,                                     # Main diagonal
                    nx*ny, nx, 1]     # Upper diagonals
+        
         if method == 1:
 
             M = self.Mesh.MakePoissonWithNeumannBC(D)
@@ -239,8 +242,8 @@ class Tissue(object):
                     for neighbour, flux in zip((flatId + offset for offset in offsets), coeffs):
                         M[neighbour, flatId] = 0.0
                         M[neighbour, neighbour] += flux
-                        
-            M = -DeleteCells.dot(M) - R*kt*v
+            
+            M = -DeleteCells.dot(M - R*kt*v)
             
             if saveIn:
                 sp.save_npz(saveIn, M)
@@ -325,7 +328,7 @@ class Tissue(object):
         print("Assembling the convection matrix")
         self.Vessels.SetLinearSystem(inletBC, outletBC)
         self.Vessels.SolveFlow()
-
+        
         # Possible gain in time by going through inlet node (i.e., in_degree==0)
         # then make another loop for the non inlets.
         M = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
@@ -339,6 +342,7 @@ class Tissue(object):
             
             for otherNode in successors:
                 flow = self.Vessels.G[node][otherNode]['flow']
+                flow = 0.0529 # In mum^3/s
                 length = self.Vessels.G[node][otherNode]['length']
                 # Upwind scheme?
                 M[otherNode, node] = -flow/length
@@ -438,10 +442,12 @@ class Tissue(object):
                                                self.A.indices,
                                                self.A.data), comm=comm)
 
+        solverType = 'bcgs' #'pgmres'
+        precondType = None #'ilu
         ksp = PETSc.KSP().create(comm=comm)
-        ksp.setType('pgmres')
+        ksp.setType(solverType)
         pc = ksp.getPC()
-        pc.setType('ilu')
+        pc.setType(precondType)
         ksp.setFromOptions()
         ksp.setOperators(petsc_mat)
         xpetsc = PETSc.Vec().create(comm=comm)
