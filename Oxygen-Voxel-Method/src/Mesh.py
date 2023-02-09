@@ -5,6 +5,7 @@ import vtk
 from typing import Union, Tuple, List
 from tqdm import tqdm
 import scipy.sparse as sp
+from astropy import units as u
 
 class UniformGrid(object):
     """
@@ -40,19 +41,28 @@ class UniformGrid(object):
     ToVTK(str)
         saves the mesh, with labels, in vtk structured points format.
     """
-    def __init__(self, dimensions=[100.0,100.0,100.0],
-        origin=[0.0,0.0,0.0], # The bottom left corner of the cuboid
-        nCells=[20,20,20],
-        spacing=None):
+    # def __init__(self, dimensions=[100.0,100.0,100.0],
+    #     origin=[0.0,0.0,0.0], # The bottom left corner of the cuboid
+    #     nCells=[20,20,20],
+    #     spacing=None):
+
+    def __init__(self, dimensions=u.Quantity([1.0,1.0,1.0], u.cm),
+                 origin=u.Quantity([0.0,0.0,0.0], u.cm),
+                 nCells=[20,20,20],
+                 spacing=None,
+                 units='mm'):
+
+        self.lengthScale = u.Unit(units)
         
         self.dimensions = dimensions
         self.origin = origin
 
-        if spacing:
+        if not spacing is None:
             if isinstance(spacing, float):
-                self.spacing = np.array([spacing, spacing, spacing])
+                spacing = u.Quantity([spacing, spacing, spacing], u.cm)
+                self.spacing = spacing.value
             else:
-                self.spacing = np.array(spacing)
+                self.spacing = u.Quantity(spacing, self.lengthScale).value
             n = np.ceil(self.dimensions/self.spacing).astype(int)
             print(self.spacing, self.dimensions, n)
             self.nCells = n
@@ -61,36 +71,45 @@ class UniformGrid(object):
             spac = self._dimensions/self._nCells
             self.spacing = spac
 
-        # self.labels = 0 # 0 for tissue, 1 for intravascular and 2 for endothelium
         self.labels = NDSparseMatrix(shape=self.nCells, defaultValue=0) # Initialize an empty sparse array, i.e., full of zeros
-
-        self.v = np.prod(self.spacing) # Volume of a cell.
         
         print(self)
     
 
-    @property
+    @property # Volume of the tissue
     def v(self) -> float:
         return self._v
     @v.setter
     def v(self, newVolume : float):
         self._v = newVolume
+
+    @property # Volume of a cell
+    def vCell(self) -> float:
+        return self._vCell
         
     @property
+    def dimensions_withUnit(self):
+        return u.Quantity(self._dimensions, self.lengthScale)
+    @property
     def dimensions(self):
-        return self._dimensions       
+        return self._dimensions
     @dimensions.setter
     def dimensions(self, dims : Union[Tuple[float], List[float], np.ndarray]):
+        dims = u.Quantity(dims, self.lengthScale).value
         if np.all(np.array(dims) > 0.0) and np.array(dims).size==3:
-            self._dimensions = np.array(dims).reshape((3,))
+            self._dimensions = u.Quantity(dims, self.lengthScale).value.reshape((3,))
         else:
             raise ValueError("Please enter valid dimensions.")
 
     @property
+    def origin_withUnit(self):
+        return u.Quantity(self._origin, self.lengthScale)
+    @property
     def origin(self):
-        return self._origin          
+        return self._origin
     @origin.setter
     def origin(self, orig : Union[Tuple[float], List[float], np.ndarray]):
+        orig = u.Quantity(orig, self.lengthScale).value
         if np.array(orig).size==3:
             self._origin = np.array(orig).reshape((3,))
         else:
@@ -109,16 +128,20 @@ class UniformGrid(object):
                 distrib['Endothelial'] +=1
             else:
                 raise ValueError(f"Label '{label}' found in "
-                                 "the label matrix is not a correct"
+                                 "the label matrix is not a valid"
                                  " label.")
-        assert sum(distrib.values())==self.nCellsTotal, "The total cells found does not match the total number of cells."
+        assert sum(distrib.values())==self.nCellsTotal, "The total number of cells found does not match the total number of cells."
         return distrib
     
+    @property
+    def spacing_withUnits(self):
+        return u.Quantity(self._spacing, self.lengthScale)    
     @property
     def spacing(self):
         return self._spacing    
     @spacing.setter
     def spacing(self, spac : Union[Tuple[float], List[float], np.ndarray]):
+        spac = u.Quantity(spac, self.lengthScale).value
         if np.all(np.array(spac) > 0.0):
             if np.array(spac).size==3:
                 self._spacing = np.array(spac).reshape((3,))
@@ -128,7 +151,12 @@ class UniformGrid(object):
                 raise ValueError("Please enter valid spacings.")
         else:
             raise ValueError("Please enter valid spacings.")
+        self._vCell = np.prod(self._spacing)
+        self._hmax  = max(self._spacing)
 
+    @property
+    def hmax(self):
+        return self._hmax
 
     @property
     def nCells(self):
@@ -163,14 +191,15 @@ class UniformGrid(object):
         oldLabel = self.labels.readValue(cellId)
         updateValue = False
         # Vessel label takes priority over other labels
-        if newLabel == 1 and (oldLabel == 0 or oldLabel == 2):
+        if newLabel == 0:
+            return False
+        elif newLabel == 1 and (oldLabel == 0 or oldLabel == 2):
             updateValue = True
         # Endothelial label takes priority over tissue label
         elif newLabel == 2 and oldLabel == 0:
             updateValue = True
-        if updateValue:
-            self._labels.addValue(cellId, newLabel)
 
+        self._labels.addValue(cellId, newLabel)
         return updateValue
 
     def ToFlatIndexFrom3D(self, ijk : Union[Tuple[int], List[int], np.ndarray]) -> int:
@@ -201,30 +230,28 @@ class UniformGrid(object):
             if ijk[m] > self.nCells[m]-1:
                 return False
         return True
-    
-    def __str__(self):
-        return f"""
-        Mesh:
-            Dimensions: {self.dimensions}
-            Origin: {self.origin}
-            Number of cells: {self.nCells}
-            Spacing: {self.spacing}
-            Total number of cells: {self.nCellsTotal}
-            """
 
-    def __repr__(self):
-        return f"UniformGrid(dimensions={self.dimensions}, " \
-            f"origin={self.origin}, " \
-            f"nCells={self.nCells}," \
-            f"spacing={self.spacing})"
-    
-    def PointToCell(self, X : Union[List[float], Tuple[float], np.ndarray]) -> np.ndarray:
+    def PointToCell1(self, X : Union[List[float], Tuple[float], np.ndarray]) -> np.ndarray:
+        # This works fine but sometimes the Repartition function gets stuck in an infinite loop
+        # The other method seems to return lower indices? May be a rounding problem.
         xarr = np.array(X).reshape((3,))
         if (np.any(xarr < self.origin) or np.any(xarr > self.origin + self.dimensions)):
             raise ValueError(f"Point {X.tolist()} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
         
         xCentered = xarr - self.origin
-        return np.floor(np.divide(xCentered, self.spacing)).astype(int)
+        cell = np.floor(np.divide(xCentered, self.spacing)).astype(int)
+        return cell
+
+    def PointToCell(self, X) -> np.ndarray:
+        # Center and normalize
+        xarr = np.divide(np.array(X).reshape((3,)) - self.origin, self.dimensions) 
+
+        if (np.any(xarr < 0) or np.any(xarr > 1)):
+            raise ValueError(f"Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
+
+        xVoxelSpace = np.multiply(xarr, self.nCells) # Project onto voxel space
+        return xVoxelSpace.astype(int)
+        
     
     def CellCenter(self, ijk : Union[np.ndarray, List[int], int, Tuple[int]]) -> np.ndarray:
         if isinstance(ijk, int):
@@ -392,3 +419,20 @@ class UniformGrid(object):
                         M[cellId, cellId-nx*ny] *= 2.0
                                                 
         return M.tolil() # Return -div(Dgrad)
+
+    def __str__(self):
+        return f"""
+        Mesh:
+            Length scale: {self.lengthScale}
+            Dimensions: {self.dimensions}
+            Origin: {self.origin}
+            Number of cells: {self.nCells}
+            Spacing: {self.spacing}
+            Total number of cells: {self.nCellsTotal}
+            """
+
+    def __repr__(self):
+        return f"UniformGrid(dimensions={self.dimensions}, " \
+            f"origin={self.origin}, " \
+            f"nCells={self.nCells}," \
+            f"spacing={self.spacing})"

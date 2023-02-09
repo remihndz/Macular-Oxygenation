@@ -10,6 +10,7 @@ from typing import Dict, Optional, Union
 from petsc4py import PETSc
 import matplotlib.pyplot as plt
 from time import time
+from tqdm import tqdm
 
 class Tissue(object):
     """A class for the generation of equations of 1D-3D oxygen perfusion of the tissue.
@@ -77,7 +78,7 @@ class Tissue(object):
         elif ccoFile:
             print(f"Reading vascular network from '{ccoFile}'.")
             self.ImportVessels(ccoFile, **kwargs)
-            print(f'Labeling mesh with wall thickness {endotheliumThickness}mm.')
+            print(f'Labeling mesh with wall thickness {endotheliumThickness}.')
         else:
             raise ValueError("Provide either a VascularNetwork' or a valid .cco file.")
         
@@ -157,13 +158,11 @@ class Tissue(object):
         # the column corresponding to the node itself.
 
         Gamma = np.ones(self.nPoints, dtype=np.float32)*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
-        # This might not be necessary because the connectivty matrix between endothelial and nodes
-        # links endothelial cells with the end node of a segment (i.e., the inlet nodes are never connected).
-        # Gamma[self.Vessels.inletNodes] = 0.0 # No mass exchange with the inlet nodes.
-        
+        ## Use this one to cancel mass exchange with the inlet(s)
+        #Gamma = np.array([1 if self.Vessels.G.predecessors(n) else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
+
         M = sp.diags(Gamma*U/self.endotheliumThickness,
                      offsets=0, format='csr', dtype=np.float32)
-    
         del Gamma
         # M = self.C3[1:,1:].T.dot(M.dot(self.C3[1:, 1:]))
         M = self.C3.T.dot(M.dot(self.C3))
@@ -226,11 +225,14 @@ class Tissue(object):
         
         if method == 1:
 
+            t = time()
             M = self.Mesh.MakePoissonWithNeumannBC(D)
+            print("\tTime to generate the Reac-Diff operator:", time()-t)
             DeleteCells = sp.eye(nx*ny*nz, format='lil')
             
             offsets.pop(3)
             coeffs.pop(3)
+            t = time()
             R = sp.eye(M.shape[0], format='lil') # The reaction term
             for index3D, label in self.labels.elements.items():
                 flatId = self.Mesh.ToFlatIndexFrom3D(index3D)
@@ -244,7 +246,7 @@ class Tissue(object):
                         M[neighbour, neighbour] += flux
             
             M = -DeleteCells.dot(M - R*kt*v)
-            
+            print("\tTime to delete diffusion in vessels",time()-t)
             if saveIn:
                 sp.save_npz(saveIn, M)
 
@@ -463,9 +465,7 @@ class Tissue(object):
         
         print("Time for solver: ", time()-t)
         return x[list(nx.topological_sort(self.Vessels.G))], x[self.nPoints:]
-                
-        
-        
+    
     
     def VesselsToVTK(self, VTKFileName : str):
         self.Vessels.VesselsToVTK(VTKFileName)
@@ -474,3 +474,37 @@ class Tissue(object):
     def MeshToVTK(self, VTKFileName : str):
         self.Vessels.MeshToVTK(VTKFileName)
         return
+
+    def ToVTK(self, VTKFileName : str, X : np.ndarray):
+        """
+        Saves the oxygen array X (1D) to VTKFileName in
+        VTK_STRUCTURED_POINTS format.
+        """
+
+        with open(VTKFileName, 'w') as f:
+            print("Writing solution to", VTKFileName)
+
+            f.write("# vtk DataFile Version 3.0\n")
+            f.write("A mesh for the computation of oxygen perfusion.\n")
+            # f.write("BINARY\n")
+            f.write("ASCII\n")
+            f.write("DATASET STRUCTURED_POINTS\n")
+            f.write(f"DIMENSIONS {self.Mesh.nCells[0]+1} {self.Mesh.nCells[1]+1} {self.Mesh.nCells[2]+1}\n")
+            f.write(f"ORIGIN {self.Mesh.origin[0]} {self.Mesh.origin[1]} {self.Mesh.origin[2]}\n")
+            f.write(f"SPACING {self.Mesh.spacing[0]} {self.Mesh.spacing[1]} {self.Mesh.spacing[2]}\n")
+            
+            # Writing the data
+            f.write(f"CELL_DATA {self.nVol}\n")
+            f.write(f"SCALARS labels int 1\n")
+            f.write(f"LOOKUP_TABLE default")
+            f.write("\n")
+            f.write("\n".join(tqdm(self.labels, desc=f"Writing labels to {VTKFileName}", total=self.nVol)))
+
+            f.write(f"SCALARS PO2 float 1\n")
+            f.write(f"LOOKUP_TABLE default")
+            f.write("\n")
+            f.write("\n".join(tqdm((str(xi) for xi in X), desc=f"Writing PO2 to {VTKFileName}", total=self.nVol)))
+
+        return     
+
+            

@@ -71,20 +71,24 @@ class VascularNetwork(object):
             the input network in .cco format
         units : str
             the length units. Must be one of
-            {'mm','cm','micron','mum'}.
+            {'mm','cm','micron','um'}.
         **kwargs : 
             additional mesh parameters
             {'dimensions','origin','spacing'}
 
         """
-        self.G = self.CreateGraph(ccoFile)
-        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T # (nVessel, nNodes) matrix
+
         self._lengthConversionDict = {'mm':1e1,
                                       'cm':1.0,
                                       'micron':1e4,
-                                      'mum':1e4}
+                                      'um':1e4}
         self.units = units
         self._isPartitionned = False
+
+        print(f"cm are converted to {self.units} by multiplying by {self._lengthConversionFactor}")
+
+        self.G = self.CreateGraph(ccoFile, convertUnitsTo=self.units)
+        self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T # (nVessel, nNodes) matrix
 
         # self.PlotGraph(self.G)
 
@@ -92,11 +96,11 @@ class VascularNetwork(object):
         # prevent having vessel cylinder outside the cuboid
         bb = self.BoundingBox()
         print("Vessels' kwargs:", kwargs)
-        maxRad = self.GetVesselData(['radius'])['radius'].max()
-        minRad = self.GetVesselData(['radius'])['radius'].min()
-        origin     = kwargs.get('origin', bb[0]) - 2*maxRad
-        dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 4*maxRad
-        spacing    = kwargs.get('spacing', [minRad/4]*3)
+        self.maxRad = self.GetVesselData(['radius'])['radius'].max()
+        self.minRad = self.GetVesselData(['radius'])['radius'].min()
+        origin     = kwargs.get('origin', bb[0]) - 2*self.maxRad
+        dimensions = kwargs.get('dimensions', bb[1]-bb[0]) + 4*self.maxRad
+        spacing    = kwargs.get('spacing', [self.minRad/4]*3)
 
         if dimensions[-1]==0:
             dimensions[-1] = 1
@@ -113,6 +117,9 @@ class VascularNetwork(object):
         self.Flow_loss = None
         self.inletBC = {}
         self.outletBC = {}
+
+        print(self)
+        
         return
 
     def LabelMesh(self, endotheliumThickness : float, repartition :bool=True):
@@ -140,6 +147,7 @@ class VascularNetwork(object):
         # self.mesh.labels = 0
         self.mesh.labels.EmptyMatrix()
         self.w = endotheliumThickness
+        print(f"{endotheliumThickness=}")
 
         # The empty connectivity matrix
         ConnVascNodesToEndothelialCells = sp.dok_array((self.nPoints, self.nPoints+self.nVol), dtype=np.int8)
@@ -162,6 +170,7 @@ class VascularNetwork(object):
             # bound the vessel extended by its radius in each direction
             p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
             cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
+
             # Iterate through the cells within the bounding box
             for cellId in ((x,y,z) for x in range(cellMin[0], cellMax[0]+1)
                                    for y in range(cellMin[1], cellMax[1]+1)
@@ -194,6 +203,7 @@ class VascularNetwork(object):
             # bound the vessel extended by its radius in each direction
             p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
             cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
+
             # Iterate through the cells within the bounding box
             for cellId in ((x,y,z) for x in range(cellMin[0], cellMax[0]+1)
                                    for y in range(cellMin[1], cellMax[1]+1)
@@ -272,14 +282,35 @@ class VascularNetwork(object):
         else:
             print("Labelling with 1 processor.")
     
-            NodesToEndothelialCells = sp.diags([-1], [0], shape=(self.nPoints, self.nVol + self.nNodes()), format='lil')
+            NodesToEndothelialCells = sp.diags([-1], [0], shape=(self.nPoints, self.nVol + self.nPoints), format='lil')
             VascularCellsToNodes = sp.lil_matrix((self.nVol, self.nPoints))
             NodesToVascularCells = np.zeros(self.nVol)
 
             for edge in tqdm((edge for edge in self.G.edges(data=True)), total=self.nVessels(), desc="Labelling in progress"):
-                _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells)             
+                _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells)
 
-                
+        for cellId, label in zip(list(self.mesh.labels.elements.keys()), list(self.mesh.labels.elements.values())):
+            if label==1:
+                node = VascularCellsToNodes[self.mesh.ToFlatIndexFrom3D(cellId)].rows[0]
+                if len(node)>1:
+                    for n in node[1:]:
+                        VascularCellsToNodes[self.mesh.ToFlatIndexFrom3D(cellId), n] = 0
+                    node = node[0]
+
+                for i,n in ((k,m) for k in range(3) for m in (-1,1)):
+                    neighbourId = list(cellId)
+                    neighbourId[i] += n
+                    neighbourId = tuple(neighbourId)
+
+                    try:
+                        if self.mesh.labels[neighbourId]==0:
+                            # Update the endothelial cells' connectivity matrix
+                            NodesToEndothelialCells[node, self.nPoints + self.mesh.ToFlatIndexFrom3D(neighbourId)] = 1.0
+                            self.mesh.labels.addValue(neighbourId, 2) # A vascular cell should be surrounded by vascular cells or endothelial cells
+                    except KeyError:
+                        #print(f"Neighbour {neighbourId} of cell {cellId} out of bounds of the tissue ({self.mesh.nCells=}).")
+                        pass
+
         return NodesToEndothelialCells.tocsr(), VascularCellsToNodes.tocsr(), sp.diags([NodesToVascularCells], [0], format='csr')
     
     def _LabelCellWithCylinder(self, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
@@ -302,14 +333,16 @@ class VascularNetwork(object):
         """
         # If we have already labeled it, don't redo it.
         i,j,k = cellId
-        
+                    
         cellCenter = self.mesh.CellCenter(cellId)
-        
-        d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center
 
-        if (d < r - endotheliumThickness/2.0):
+        d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center           
+
+        
+        if (d < r-endotheliumThickness/2.0):
             newLabel = 1
-        elif (d < r+ max(endotheliumThickness, min(self.mesh.spacing))/2.0):
+            #elif (d < r - endotheliumThickness/2.0 + 0.87*self.mesh.hmax): # 0.87~=sqrt(3)/2 which is the max distance to the center of the unit cube
+        elif (d<r+endotheliumThickness/2.0):
             newLabel = 2
         else:
             newLabel = 0
@@ -327,12 +360,12 @@ class VascularNetwork(object):
         #     d = H * (1-c*c)**0.5
         # assert isclose(d, old_d, rel_tol=1e-5), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
 
-        if (d < r - endotheliumThickness/2.0):
-            otherLabel = 1
-        elif (d < r+endotheliumThickness/2.0):
-            otherLabel = 2
-        else:
-            otherLabel = 0
+        # if (d < r - endotheliumThickness/2.0):
+        #     otherLabel = 1
+        # elif (d < r+endotheliumThickness/2.0):
+        #     otherLabel = 2
+        # else:
+        #     otherLabel = 0
 
         # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'} 
         updatedValue = self.mesh.SetLabelOfCell(newLabel, cellId)        
@@ -383,15 +416,16 @@ class VascularNetwork(object):
         writer.Write()
 
         return
-            
+
     def Repartition(self, maxDist=1):
         '''
         Split vessels so that end nodes are at most maxDist cells away
         from each other.
         '''
-        nSplit = 0
+        nSplit = 0        
+
         vesselsToSplit = []
-        for e in self.G.edges():
+        for e in list(self.G.edges()):
             # e is a tuple (n1,n2)
             x1, x2 = self.G.nodes[e[0]]['position'], self.G.nodes[e[1]]['position']
             cell1, cell2 = self.mesh.PointToCell(x1), self.mesh.PointToCell(x2)
@@ -429,7 +463,7 @@ class VascularNetwork(object):
         ## Create new node
         newNode = self.nPoints
         ## Should be an unused name
-        # assert not newNode in list(self.G.nodes), f"Node name {newNode} already exists."
+        assert not newNode in list(self.G.nodes), f"Node name {newNode} already exists."
 
         # Add the new node to the list of nodes
         newNodePos = (self.G.nodes[edge[0]]['position'] + self.G.nodes[edge[1]]['position'])/2.0
@@ -442,10 +476,10 @@ class VascularNetwork(object):
         self.G.remove_edge(edge[0], edge[1])
         # print(f"Removed {edge=}.") 
         # First segment
-        dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[0]]['position'])
+        dataDict['length'] /= 2.0 #np.linalg.norm(newNodePos-self.G.nodes[edge[0]]['position'])
         self.G.add_edge(edge[0], newNode, **dataDict)
         # Second segment
-        dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[1]]['position'])
+        #dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[1]]['position'])
         self.G.add_edge(newNode, edge[1], **dataDict)
 
         # print(f"Created edges {(edge[0], newNode)} and {(newNode, edge[1])} with length {self.G[edge[0]][newNode]['length']}")
@@ -528,6 +562,9 @@ class VascularNetwork(object):
 
         self.Flow_rhs    = np.concatenate([np.zeros(self.nVessels()),
                                            (I-D).dot(qBar) + D.dot(pBar)])
+
+        print(self)
+        
         return
 
     def SolveFlow(self):
@@ -536,7 +573,7 @@ class VascularNetwork(object):
             raise ValueError("Linear system has not been set yet.")
 
         x = scipy.sparse.linalg.spsolve(self.Flow_matrix, self.Flow_rhs)
-        f,p = x[:self.nVessels()]/60.0, x[self.nVessels():]
+        f,p = x[:self.nVessels()], x[self.nVessels():]
         dp  = self.C.dot(p)
 
         # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
@@ -680,7 +717,7 @@ class VascularNetwork(object):
         self._w = endotheliumThickness
         
     @property
-    def units(self):
+    def units(self) -> str:
         return self._units
     @units.setter
     def units(self, newUnits):
@@ -704,7 +741,7 @@ class VascularNetwork(object):
         
 
     @staticmethod
-    def CreateGraph(ccoFile : str, convertUnitsTo='mm') -> nx.DiGraph:
+    def CreateGraph(ccoFile : str, convertUnitsTo) -> nx.DiGraph:
 
         lengthConversionDict = {'mm':1e1,
                                 'cm':1.0,
@@ -712,6 +749,7 @@ class VascularNetwork(object):
                                 'mum':1e4}
         try:
             lengthConversion = lengthConversionDict[convertUnitsTo]
+            print(f"{lengthConversion=}")
         except:
             raise KeyError(f"Wrong key '{convertUnitsTo}' for unit conversion. Valid keys are {lengthConversionDict.keys()}")
         
@@ -722,41 +760,65 @@ class VascularNetwork(object):
             token = f.readline()
             token = f.readline().split() # Tree information
 
-            G.add_node(0, position=np.array([float(xi) for xi in token[:3]]) * lengthConversion)
+            # G.add_node(0, position=np.array([float(xi) for xi in token[:3]]) * lengthConversion)
             
             f.readline() # Blank line
             f.readline() # *Vessels
             nVessels = int(f.readline())
             print(f'The tree has {nVessels} vessels.')
 
-            vesselRadii = dict()
-            vesselLength = dict()
 
+            edges = dict()
+            
             for i in range(nVessels):
 
                 vessel = f.readline().split()
                 vesselId = int(vessel[0])
-                vesselRadii[vesselId] = float(vessel[12]) * lengthConversion
-                vesselLength[vesselId] = np.linalg.norm(np.array([float(x) for x in vessel[1:4]])
-                                                         -np.array([float(x) for x in vessel[4:7]])) * lengthConversion
-                G.add_node(vesselId+1, position=np.array([float(xi) for xi in vessel[4:7]]) * lengthConversion)
+                x1,x2 = np.array([float(x) for x in vessel[1:4]])*lengthConversion, np.array([float(x) for x in vessel[4:7]])*lengthConversion
+                r = float(vessel[12]) * lengthConversion
+                l = np.linalg.norm(x1-x2) * lengthConversion
+
+                edges[vesselId] = {'radius':r, 'length':l,'start':x1,'end':x2}
+                
+                # G.add_node(vesselId+1, position=np.array([float(xi) for xi in vessel[4:7]]) * lengthConversion)
 
             f.readline() # Blank line
             f.readline() # *Connectivity
 
-            edges = []
+            rootId = None
             for i in range(nVessels):
                 
                 vessel = f.readline().split()
+                vesselId = int(vessel[0])
 
-                if int(vessel[1]) == -1: # If root
-                    edges.append((0, 1, {'radius':vesselRadii[0], 'length':vesselLength[0], 'hd':0.45}))
+                edges[vesselId]['parent'] = int(vessel[1])
+                if int(vessel[1])==-1:
+                    rootId = vesselId
+                edges[vesselId]['descendants'] = [int(descendant) for descendant in vessel[2:]]
+                
+                # if int(vessel[1]) == -1: # If root
+                #     edges.append((0, 1, {'radius':vesselRadii[0], 'length':vesselLength[0], 'hd':0.45}))
                     
-                else:
-                    vessel, parent = int(vessel[0]), int(vessel[1])
-                    edges.append((parent+1, vessel+1, {'radius':vesselRadii[vessel], 'length':vesselLength[vessel], 'hd':0.45}))
+                # else:
+                #     vessel, parent = int(vessel[0]), int(vessel[1])
+                #     edges.append((parent+1, vessel+1, {'radius':vesselRadii[vessel], 'length':vesselLength[vessel], 'hd':0.45}))
 
-            G.add_edges_from(edges)
+            # G.add_edges_from(edges)
+            vesselId, node, nodep = rootId, 0, 1 # Start with the root
+            
+            
+            def AddVesselToGraph(vesselId, startNode):
+                endNode = G.number_of_nodes()
+                vessel = edges.pop(vesselId)
+                G.add_node(endNode, position=vessel['end'])
+                G.add_edge(startNode, endNode, radius=vessel['radius'], length=vessel['length'], hd=vessel.pop('hd',0.45))
+
+                for descendant in vessel['descendants']:
+                    AddVesselToGraph(descendant, endNode)
+
+            G.add_node(0, position=edges[rootId]['start'])
+            AddVesselToGraph(rootId, 0)                
+            print(f"{(len(edges)==0)=}")
         return G
 
     
@@ -769,7 +831,7 @@ class VascularNetwork(object):
         '''
         Radius should be in microns.
         '''
-        d = 2 * self._lengthConversionDict['micron']/self._lengthConversionDict[self.units]
+        d = 2 * radius * self._lengthConversionDict['micron']/self._lengthConversionDict[self.units]
         
         if Type=='Constant':
             return 3.6 # cP
@@ -789,7 +851,9 @@ class VascularNetwork(object):
         Vessels:
             Number of nodes: {self.nPoints}
             Number of segments: {self.nVessels()}
+            Length scale: {self.units}
             Bounding box: {[bb.tolist() for bb in self.BoundingBox()]}
+            Maximum/Minimum radii: {self.maxRad}/{self.minRad}
             Inlet boundary condition: {self.inletBC}
             Outlet boudary condition: {self.outletBC}
         """

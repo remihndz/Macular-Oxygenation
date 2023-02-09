@@ -16,7 +16,8 @@ import scipy.sparse.linalg as spl
 from math import ceil
 from tqdm import tqdm
 from sparse_dot_mkl import sparse_qr_solve_mkl                                                                        
-
+from astropy import units as u
+from astropy.constants import R # Ideal gas constant
 
 def fastspy(A, cmap='RdBu'):
     plt.scatter(A.row, A.col, edgecolors='none',c=A.data,
@@ -25,63 +26,64 @@ def fastspy(A, cmap='RdBu'):
     plt.gca().invert_yaxis()
     plt.show()
 
-w = 1e-3 # 1 micron
-U = 2400*1e-5 # Permeability in mm^2/
-kt = 4.5*1e-5
-Rg = 62.36*1e6 # Ideal gas constant, in mm3.mmHg.K-1.mol-1 
-Tb = 309.25    # Blood temperature, 36.1*C in Kelvin
-c0 = 50/Rg/Tb*1e9
-print(f"{c0=}")
+
+unitsL = u.Unit('mm')
+unitsT = u.Unit('s')
+
+#R = R.to((unitsL**3) * u.torr / u.K / u.mol) # Gas constant
+f_CRA = 49.34 * u.uL/u.min
+w = 1*u.um # 1 micron
+U = 2400 * u.um*u.um/u.s # Permeability in um^2/s
+D = 1800 * u.um*u.um/u.s # Diffusion in um^2/s
+c0 = 50 * u.torr
+kt = 4.5 / u.min
+Tb = 309.25 * u.K    # Blood temperature, 36.1*C in Kelvin
+
+c0 = c0/R/Tb
+w = w.to(unitsL, copy=False)
+f_CRA = f_CRA.to(unitsL**3 / unitsT, copy=False)
+U = U.to(unitsL**2 / unitsT, copy=False)
+D = D.to(unitsL**2 / unitsT, copy=False)
+kt = kt.to(unitsT**-1, copy=False)
+c0 = c0.to(u.mol / (unitsL**3), copy=False)
+
+print(f"""Simulation coefficients:
+\tInlet concentration: {c0=}
+\tWall thickness: {w=}
+\tDiffusion: {D=}
+\tWall permeability: {U=}
+\tTissue consumption: {kt=}
+\tInlet blood flow (may not be used): {f_CRA=}
+""")
+
 
 #vessels = VascularNetwork.VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
 #tissue = Tissue.Tissue(Vessels = vessels)
-tissue = Tissue.Tissue(ccoFile='sim_19.cco', spacing=3*[5e-2]) # Large-ish network
-#tissue = Tissue.Tissue(ccoFile='1Vessel.cco', w=w, spacing=3*[5e-3])# dimensions=[0.5,0.5,0.5]) # One vessel
-#tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w)
+#tissue = Tissue.Tissue(ccoFile='sim_19.cco', w=w, spacing=3*[100*u.um], units=str(unitsL)) # Large-ish network
+tissue = Tissue.Tissue(ccoFile='1Vessel.cco', units=str(unitsL), w=w, spacing=3*[5*u.um])#, dimensions=[0.5,0.5,0.5]) # One vessel
+#tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w, spacing=5.0e-2, units=unitsL)
 
-tissue.Vessels.SetLinearSystem(inletBC={'pressure':50},
-                               outletBC={'pressure':25})
-tissue.Vessels.SolveFlow()
+# tissue.Vessels.SetLinearSystem(inletBC={'flow':f_CRA.value},
+#                                outletBC={'pressure':25})
+# tissue.Vessels.SolveFlow()
 
-tissue.VesselsToVTK('Vessels.vtp')
-tissue.MeshToVTK('LabelledMesh.vtk')
+# tissue.MeshToVTK('LabelledMesh.vtk')
+
+tissue.MakeReactionDiffusion(D.value, kt.value, method=1)#='ReactionDiffusion.npz')
+tissue.MakeMassTransfer(U.value )#='MassTransfer.npz')
+tissue.MakeConvection(inletBC={'pressure':50},
+                      outletBC={'pressure':25})#='Convection.npz')
+tissue.MakeRHS(c0.value)#='rhs.npz')
+
+sp.save_npz("Overall.npz", tissue.A.tocoo())
+xb, xt = tissue.Solve(checkForEmptyRows=False)
+tissue.ToVTK('PO2.vtk', xt)
+x = xt.reshape(tissue.nx, order='F')
 
 flow, radius, dp, mu, length = tissue.Vessels.GetVesselData(['flow', 'radius', 'dp',
                                                              'viscosity', 'length'],
-                                                    returnAList=True)
-
-# inletPressure = dp[tissue.Vessels.inletNodes]/133.3224
-# outletPressure = dp[tissue.Vessels.outletNodes]/133.3224
-
-# print(f'{tissue.nPoints=} {tissue.nSeg=}')
-
-# NegativePressure = [tissue.Vessels.outletNodes[i] for i in range(outletPressure.size) if (inletPressure[0]-outletPressure[i]<0)]
-# NegativePressure = [tissue.nPoints, tissue.nPoints+tissue.nSeg-1]
-# print(NegativePressure)
-# print(f'{tissue.Vessels.Flow_rhs[NegativePressure]=}')
-# print(f'{tissue.Vessels.Flow_matrix[(tissue.nPoints-1+np.array(NegativePressure)).tolist(),:]}')
-# fig, ax = plt.subplots(1,2)
-# ax = ax.ravel()
-# ax[0].plot(inletPressure-outletPressure)
-# ax[1].plot(dp/133.3224) #, flow*8*length*mu/(np.pi*(radius**4)))
-# plt.show()
-
-tissue.MakeReactionDiffusion(1800, kt, method=1, )#='ReactionDiffusion.npz')
-tissue.MakeMassTransfer(U, )#='MassTransfer.npz')
-tissue.MakeConvection()#='Convection.npz')
-tissue.MakeRHS(c0, )#='rhs.npz')
-
-# tissue.rhs = np.zeros(tissue.A.shape[1])
-# tissue.rhs[:tissue.nPoints] = 50
-# I = np.ones(tissue.A.shape[1])
-# I[:tissue.nPoints] = 0
-# I = sp.diags([I], [0], format='csr')
-# tissue.A = I.dot(tissue.A) + sp.eye(I.shape[0]) - I
-# plt.spy(tissue.A)
-# plt.show()
-sp.save_npz("Overall.npz", tissue.A.tocoo())
-xb, xt = tissue.Solve(checkForEmptyRows=True)
-x = xt.reshape(tissue.nx, order='F')
+                                                            returnAList=True)
+tissue.VesselsToVTK('Vessels.vtp')
 
 #M = tissue.A[tissue.nPoints:, tissue.nPoints:].tolil()
 # plt.spy(M)
