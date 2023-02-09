@@ -27,17 +27,18 @@ def fastspy(A, cmap='RdBu'):
     plt.show()
 
 
-unitsL = u.Unit('mm')
-unitsT = u.Unit('s')
+unitsL = u.Unit('cm')
+unitsT = u.Unit('ms')
 
 #R = R.to((unitsL**3) * u.torr / u.K / u.mol) # Gas constant
 f_CRA = 49.34 * u.uL/u.min
 w = 1*u.um # 1 micron
-U = 2400 * u.um*u.um/u.s # Permeability in um^2/s
-D = 1800 * u.um*u.um/u.s # Diffusion in um^2/s
+U = 2400 * u.um*u.Unit('micron')/u.s # Permeability in um^2/s
+D = 1800 * u.um*u.Unit('micron')/u.s # Diffusion in um^2/s
 c0 = 50 * u.torr
-kt = 4.5 / u.min
+kt = 4.5 / u.min *0
 Tb = 309.25 * u.K    # Blood temperature, 36.1*C in Kelvin
+spacing = u.Quantity([5, 5, 10], 'micron')
 
 c0 = c0/R/Tb
 w = w.to(unitsL, copy=False)
@@ -59,15 +60,15 @@ print(f"""Simulation coefficients:
 
 #vessels = VascularNetwork.VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
 #tissue = Tissue.Tissue(Vessels = vessels)
-#tissue = Tissue.Tissue(ccoFile='sim_19.cco', w=w, spacing=3*[100*u.um], units=str(unitsL)) # Large-ish network
-tissue = Tissue.Tissue(ccoFile='1Vessel.cco', units=str(unitsL), w=w, spacing=3*[5*u.um])#, dimensions=[0.5,0.5,0.5]) # One vessel
-#tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w, spacing=5.0e-2, units=unitsL)
+#tissue = Tissue.Tissue(ccoFile='sim_19.cco', w=w, spacing=spacing, units=str(unitsL)) # Large-ish network
+#tissue = Tissue.Tissue(ccoFile='1Vessel.cco', units=str(unitsL), w=w, spacing=spacing)#, dimensions=[0.5,0.5,0.5]) # One vessel
+tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w, spacing=spacing, units=str(unitsL))
 
 # tissue.Vessels.SetLinearSystem(inletBC={'flow':f_CRA.value},
 #                                outletBC={'pressure':25})
 # tissue.Vessels.SolveFlow()
 
-# tissue.MeshToVTK('LabelledMesh.vtk')
+tissue.MeshToVTK('LabelledMesh.vtk')
 
 tissue.MakeReactionDiffusion(D.value, kt.value, method=1)#='ReactionDiffusion.npz')
 tissue.MakeMassTransfer(U.value )#='MassTransfer.npz')

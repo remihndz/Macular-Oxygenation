@@ -8,6 +8,7 @@ import numpy as np
 from typing import Dict, Optional, Union
 # from sparse_dot_mkl import sparse_qr_solve_mkl
 from petsc4py import PETSc
+from mpi4py.MPI import COMM_WORLD as mpi_comm
 import matplotlib.pyplot as plt
 from time import time
 from tqdm import tqdm
@@ -228,25 +229,28 @@ class Tissue(object):
             t = time()
             M = self.Mesh.MakePoissonWithNeumannBC(D)
             print("\tTime to generate the Reac-Diff operator:", time()-t)
-            DeleteCells = sp.eye(nx*ny*nz, format='lil')
+            DeleteCells = np.ones(M.shape[0]) #sp.eye(nx*ny*nz, format='lil')
             
             offsets.pop(3)
             coeffs.pop(3)
             t = time()
-            R = sp.eye(M.shape[0], format='lil') # The reaction term
+            R = np.ones(M.shape[0]) # sp.eye(M.shape[0], format='lil') # The reaction term
             for index3D, label in self.labels.elements.items():
                 flatId = self.Mesh.ToFlatIndexFrom3D(index3D)
-                R[flatId, flatId] = 0.0
+                R[flatId] = 0.0
                 if label==1:
-                    DeleteCells[flatId, flatId] = 0.0
+                    DeleteCells[flatId] = 0.0
                     
                     # Delete diffusion from vascular cells
                     for neighbour, flux in zip((flatId + offset for offset in offsets), coeffs):
                         M[neighbour, flatId] = 0.0
                         M[neighbour, neighbour] += flux
-            
-            M = -DeleteCells.dot(M - R*kt*v)
-            print("\tTime to delete diffusion in vessels",time()-t)
+
+            t1 = time()
+            DeleteCells = sp.diags(DeleteCells, 0, format='csr')
+            M = -DeleteCells.dot(M - sp.diags(R)*kt*v)
+            print("\tTime to make the multiplication", time()-t)
+            print("\tTime to delete diffusion in vessels",time()-t1)
             if saveIn:
                 sp.save_npz(saveIn, M)
 
@@ -344,7 +348,7 @@ class Tissue(object):
             
             for otherNode in successors:
                 flow = self.Vessels.G[node][otherNode]['flow']
-                flow = 0.0529 # In mum^3/s
+                #flow = 0.0529 # In mum^3/s
                 length = self.Vessels.G[node][otherNode]['length']
                 # Upwind scheme?
                 M[otherNode, node] = -flow/length
@@ -437,13 +441,13 @@ class Tissue(object):
         # Sanity check
         if self.A.getformat() != 'csr':
             self.A = self.A.tocsr()
-    
-        comm = PETSc.COMM_WORLD
+
+        comm = mpi_comm
         petsc_mat = PETSc.Mat().createAIJ(size=self.A.shape,
                                           csr=(self.A.indptr,
                                                self.A.indices,
                                                self.A.data), comm=comm)
-
+        
         solverType = 'bcgs' #'pgmres'
         precondType = None #'ilu
         ksp = PETSc.KSP().create(comm=comm)

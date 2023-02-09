@@ -10,24 +10,24 @@ class NDSparseMatrix:
 
     self._count = 0 # Used to iter through the array
 
-  def addValue(self, tuple, value):
+  def addValue(self, key, value):
     if value==self.defaultValue:
       return
-    self.elements[tuple] = value
+    self.elements[tuple(key)] = value
 
-  def readValue(self, tuple):
+  def readValue(self, key : tuple):
     try:
-      value = self.elements[tuple]
+      value = self.elements[tuple(key)]
     except KeyError:
-      if tuple[0] < self.shape[0] and tuple[1] < self.shape[1] and tuple[2] < self.shape[2]:
+      if key[0] < self.shape[0] and key[1] < self.shape[1] and key[2] < self.shape[2]:
         # could also be 0.0 if using floats...
         value = self.defaultValue
       else:
-        raise KeyError(f"Index {tuple} out of bound for matrix of shape {self.shape}.")
+        raise KeyError(f"Index {key} out of bound for matrix of shape {self.shape}.")
     return value
 
   def __getitem__(self, item : tuple):
-    return self.readValue(item)
+    return self.readValue(tuple(item))
 
   def EmptyMatrix(self):
     self.elements.clear

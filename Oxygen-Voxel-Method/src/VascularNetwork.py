@@ -81,7 +81,8 @@ class VascularNetwork(object):
         self._lengthConversionDict = {'mm':1e1,
                                       'cm':1.0,
                                       'micron':1e4,
-                                      'um':1e4}
+                                      'um':1e4,
+                                      'mum':1e4}
         self.units = units
         self._isPartitionned = False
 
@@ -110,7 +111,8 @@ class VascularNetwork(object):
         self.mesh = UniformGrid(dimensions = dimensions,
                                 origin = origin,
                                 nCells = nCells,
-                                spacing = spacing)
+                                spacing = spacing,
+                                units=self.units)
 
         # Initialize linear system to None for error handling
         self.Flow_matrix = self.Flow_rhs = None
@@ -137,31 +139,36 @@ class VascularNetwork(object):
         
         Returns
         -------
-        ConnVascNodesToEndothelialCells : scipy.sparse_array
+        NodesToEndothelialCells : scipy.sparse_array
             The connectivity matrix of vascular nodes to endothelial cells.
+        NodesToVascularCells : scipy.sparse_array
+            The connectivity matrix of vascular nodes to vascular cells.
+        VascularCellsToNodes : scipy.sparse_array
+            The connectivity matrix of vascular cells to vascular nodes.
         """
+        
         global _Label
 
         if repartition:
             self.Repartition(maxDist=1) # Split the vessels to the size of the mesh
-        # self.mesh.labels = 0
+
         self.mesh.labels.EmptyMatrix()
         self.w = endotheliumThickness
-        print(f"{endotheliumThickness=}")
 
         # The empty connectivity matrix
-        ConnVascNodesToEndothelialCells = sp.dok_array((self.nPoints, self.nPoints+self.nVol), dtype=np.int8)
 
         def _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells):
 
             n1,n2,data = edge
             
-            p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
+            p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']                    
+            
             r,l = data['radius'], data['length']
             vectorDirection = (p1-p2)/l # Unit vector (direction)
 
-            l_new, l_old = np.linalg.norm(p1-p2), l
-            if not l_new == l_old: f"The length stored in the graph's edge data is incorrect: {l_old=} {l_new=} for vessel {(n1,n2)=}: {self.G.nodes[n1]=}, {self.G.nodes[n2]=}."
+            # l_new, l_old = np.linalg.norm(p1-p2), l
+            # if  np.isclose(l_new, l_old):
+            #     print(f"The length stored in the graph's edge data is incorrect: {l_old=} {l_new=} for vessel {(n1,n2)=}: {self.G.nodes[n1]=}, {self.G.nodes[n2]=}.")
             P = np.outer(vectorDirection, vectorDirection) # Matrix of the orthogonal projection onto the vessel axis
             O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
 
@@ -286,6 +293,18 @@ class VascularNetwork(object):
             VascularCellsToNodes = sp.lil_matrix((self.nVol, self.nPoints))
             NodesToVascularCells = np.zeros(self.nVol)
 
+            for edge in self.G.edges(data=True):
+
+                n1,n2, data = edge
+                p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
+                d = (p1-p2)/data['length']
+                for t in np.linspace(-self.mesh.hmax/data['length'], self.mesh.hmax/data['length']+1, endpoint=True, num=10):
+                    cellId = self.mesh.PointToCell(p1 + t*data['length']*d)
+                    HasUpdated = self.mesh.SetLabelOfCell(1, cellId)        
+                    if HasUpdated:
+                        VascularCellsToNodes[self.mesh.ToFlatIndexFrom3D(cellId), n2] = 1
+                        NodesToVascularCells[self.mesh.ToFlatIndexFrom3D(cellId)] = 1
+                
             for edge in tqdm((edge for edge in self.G.edges(data=True)), total=self.nVessels(), desc="Labelling in progress"):
                 _LabelSerial(edge, NodesToEndothelialCells, VascularCellsToNodes, NodesToVascularCells)
 
@@ -337,7 +356,6 @@ class VascularNetwork(object):
         cellCenter = self.mesh.CellCenter(cellId)
 
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center           
-
         
         if (d < r-endotheliumThickness/2.0):
             newLabel = 1
@@ -346,26 +364,6 @@ class VascularNetwork(object):
             newLabel = 2
         else:
             newLabel = 0
-
-        # print(f'{newLabel=}: {d=} {r=} {endotheliumThickness=}')
-        
-        # # Just a check using another method
-        # old_d = d
-        # v1, v2 = p2-p1, cellCenter-p1
-        # if np.array_equal(p1, cellCenter) or np.array_equal(p2, cellCenter):
-        #     d = 0
-        # else:
-        #     H = np.linalg.norm(v2)
-        #     c = np.inner(v1,v2)/(np.linalg.norm(v1)*H)
-        #     d = H * (1-c*c)**0.5
-        # assert isclose(d, old_d, rel_tol=1e-5), f"Both methods don't compute the same radial distance {old_d=}, {d=} for {p1=}, {p2=} and {cellCenter=}."
-
-        # if (d < r - endotheliumThickness/2.0):
-        #     otherLabel = 1
-        # elif (d < r+endotheliumThickness/2.0):
-        #     otherLabel = 2
-        # else:
-        #     otherLabel = 0
 
         # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'} 
         updatedValue = self.mesh.SetLabelOfCell(newLabel, cellId)        
@@ -422,7 +420,9 @@ class VascularNetwork(object):
         Split vessels so that end nodes are at most maxDist cells away
         from each other.
         '''
-        nSplit = 0        
+        nSplit = 0
+        if maxDist < 1:
+            maxDist = 1
 
         vesselsToSplit = []
         for e in list(self.G.edges()):
@@ -447,6 +447,7 @@ class VascularNetwork(object):
                 for newEdge in newEdges:
                     x1, x2 = self.G.nodes[newEdge[0]]['position'], self.G.nodes[newEdge[1]]['position']
                     cell1, cell2 = self.mesh.PointToCell(x1), self.mesh.PointToCell(x2)
+                    
                     if self.mesh.Dist(cell1, cell2) > maxDist:
                         newVesselsToSplit.append(newEdge)
             # Repeat the process with the newly created vessels                    
@@ -746,7 +747,9 @@ class VascularNetwork(object):
         lengthConversionDict = {'mm':1e1,
                                 'cm':1.0,
                                 'micron':1e4,
-                                'mum':1e4}
+                                'mum':1e4,
+                                'um':1e4,
+                                'microns':1e4}
         try:
             lengthConversion = lengthConversionDict[convertUnitsTo]
             print(f"{lengthConversion=}")
