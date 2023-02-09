@@ -19,8 +19,11 @@ class NDSparseMatrix:
     try:
       value = self.elements[tuple]
     except KeyError:
-      # could also be 0.0 if using floats...
-      value = self.defaultValue
+      if tuple[0] < self.shape[0] and tuple[1] < self.shape[1] and tuple[2] < self.shape[2]:
+        # could also be 0.0 if using floats...
+        value = self.defaultValue
+      else:
+        raise KeyError(f"Index {tuple} out of bound for matrix of shape {self.shape}.")
     return value
 
   def __getitem__(self, item : tuple):
