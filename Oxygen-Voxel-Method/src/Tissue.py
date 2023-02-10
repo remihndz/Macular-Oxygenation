@@ -64,7 +64,7 @@ class Tissue(object):
             Used if Vessels is not given.
         w : float
             The thickness of the vessels' walls.
-            Default to 1e-3 (1micron in mm).        
+            Default to 1micron.        
         
         """
 
@@ -127,7 +127,7 @@ class Tissue(object):
     
     def ImportVessels(self, ccoFileName : str, endotheliumThickness : float = 1e-3, **kwargs):
         ccoFile = kwargs.pop('ccoFile', None)
-        units = kwargs.pop('units', 'mm')
+        units = kwargs.pop('units', {'length':'cm', 'time':'s'})
         self.Vessels = VascularNetwork(ccoFileName, units, **kwargs)
         self.Vessels.w = endotheliumThickness
         return
@@ -150,17 +150,9 @@ class Tissue(object):
         print("Assembling the mass transfer coefficients matrix", end='....')
             
         vesselData = self.Vessels.GetVesselData(['radius', 'length'])
-        # Compute (curved) surface area of each vessel
-        # as an estimate of the contact area between
-        # intravascular and endothelial cells.
-        # The results is scaled by the number of
-        # endothelial cells attached to the vessel,
-        # namely the number of 1s in a row -1 for
-        # the column corresponding to the node itself.
-
         Gamma = np.ones(self.nPoints, dtype=np.float32)*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
         ## Use this one to cancel mass exchange with the inlet(s)
-        #Gamma = np.array([1 if self.Vessels.G.predecessors(n) else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
+        Gamma = np.array([1 if self.Vessels.G.predecessors(n) else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
 
         M = sp.diags(Gamma*U/self.endotheliumThickness,
                      offsets=0, format='csr', dtype=np.float32)
@@ -172,9 +164,9 @@ class Tissue(object):
         # Add the equations linking vascular cells with vascular nodes
         M = M + sp.vstack([sp.csr_matrix((self.nPoints, self.nPoints+self.nVol)), sp.hstack([-self.C4, self.I4])])
         
-        del self.C4
-        del self.C3
-        del self.I4
+        # del self.C4
+        # del self.C3
+        # del self.I4
 
         if saveIn:
             sp.save_npz(saveIn, M)
@@ -254,8 +246,10 @@ class Tissue(object):
             if saveIn:
                 sp.save_npz(saveIn, M)
 
+            t = time()
             M = sp.vstack((sp.lil_matrix( (self.nPoints, self.nVol), dtype=np.float32), M)).tolil()
             M = sp.hstack((sp.lil_matrix( (self.nVol+self.nPoints, self.nPoints), dtype=np.float32), M)).tolil()
+            print("\tTime to pad the matrix:", time()-t)
             try:
                 def foo(x): # An empty function to test if A is defined
                     pass
@@ -343,12 +337,11 @@ class Tissue(object):
             
             if not self.Vessels.G.pred[node]: 
                 # It is an inlet node
-                print(f"Inlet node equation is at row {node}")
+                print(f"Inlet node equation at row {node}")
                 M[node, node] = 1
             
             for otherNode in successors:
                 flow = self.Vessels.G[node][otherNode]['flow']
-                #flow = 0.0529 # In mum^3/s
                 length = self.Vessels.G[node][otherNode]['length']
                 # Upwind scheme?
                 M[otherNode, node] = -flow/length
@@ -437,7 +430,10 @@ class Tissue(object):
         # print("gmrest exited with code:", info)
 
         # Using PETSc
-        print("Solving with PETSc")
+        def monitor(ksp, its, rnorm):
+                if its%100 == 0:
+                    print('%5d      %20.15g / %2.2g'%(its,rnorm, ksp.getTolerances()[0]))
+
         # Sanity check
         if self.A.getformat() != 'csr':
             self.A = self.A.tocsr()
@@ -447,14 +443,19 @@ class Tissue(object):
                                           csr=(self.A.indptr,
                                                self.A.indices,
                                                self.A.data), comm=comm)
-        
-        solverType = 'bcgs' #'pgmres'
-        precondType = None #'ilu
+
+        solverType = 'pgmres' #'bcgs'
+        precondType = 'ilu'
         ksp = PETSc.KSP().create(comm=comm)
         ksp.setType(solverType)
+        ksp.setMonitor(monitor)
         pc = ksp.getPC()
         pc.setType(precondType)
-        ksp.setFromOptions()
+        ksp.setTolerances(rtol=1e-8, max_it=1000)            
+
+        print(f"Solving with PETSc and {ksp.getType()} (preconditionner: {pc.getType()})")
+
+        print(f"Iter.      residual norm / rtol")
         ksp.setOperators(petsc_mat)
         xpetsc = PETSc.Vec().create(comm=comm)
         b = PETSc.Vec().createWithArray(self.rhs.toarray()[:,0], comm=comm)
@@ -465,7 +466,10 @@ class Tissue(object):
         del ksp
         del petsc_mat
         del b
-        del xpetsc       
+        del xpetsc
+        
+        for i, e in enumerate(self.Vessels.G.edges()):
+            self.Vessels.G[e[0]][e[1]]['PO2'] = x[i]
         
         print("Time for solver: ", time()-t)
         return x[list(nx.topological_sort(self.Vessels.G))], x[self.nPoints:]

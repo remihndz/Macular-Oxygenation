@@ -191,15 +191,15 @@ class UniformGrid(object):
         oldLabel = self.labels.readValue(cellId)
         updateValue = False
         # Vessel label takes priority over other labels
-        if newLabel == 0:
+        if newLabel == 0 or oldLabel==1:
             return False
-        elif newLabel == 1 and (oldLabel == 0 or oldLabel == 2):
+        elif newLabel == 1 and oldLabel != 1:
             updateValue = True
+            self._labels.addValue(cellId, newLabel)
         # Endothelial label takes priority over tissue label
         elif newLabel == 2 and oldLabel == 0:
             updateValue = True
-
-        self._labels.addValue(cellId, newLabel)
+            self._labels.addValue(cellId, newLabel)
         return updateValue
 
     def ToFlatIndexFrom3D(self, ijk : Union[Tuple[int], List[int], np.ndarray]) -> int:

@@ -13,6 +13,7 @@ import matplotlib.pylab as plt
 from tqdm import tqdm
 import multiprocessing
 import sys
+from astropy import units as u
 
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
@@ -62,15 +63,17 @@ class VascularNetwork(object):
         Plots a graph.
     """
     
-    def __init__(self, ccoFile : str, units : str='mm', **kwargs):        
+    def __init__(self, ccoFile : str,
+                 units : Dict[str, str]={'length':'mm','time':'s'},
+                 **kwargs):        
         """Creator for the class VascularNetwork
 
         Parameters
         ----------
         ccoFile : str
             the input network in .cco format
-        units : str
-            the length units. Must be one of
+        units : dict(str,str)
+            the time and length units. Length must be one of
             {'mm','cm','micron','um'}.
         **kwargs : 
             additional mesh parameters
@@ -86,9 +89,9 @@ class VascularNetwork(object):
         self.units = units
         self._isPartitionned = False
 
-        print(f"cm are converted to {self.units} by multiplying by {self._lengthConversionFactor}")
+        print(f"cm are converted to {self.unitsL} by multiplying by {self._lengthConversionFactor}")
 
-        self.G = self.CreateGraph(ccoFile, convertUnitsTo=self.units)
+        self.G = self.CreateGraph(ccoFile, convertUnitsTo=self.unitsL)
         self.C = -1.0 * nx.incidence_matrix(self.G, oriented=True).T # (nVessel, nNodes) matrix
 
         # self.PlotGraph(self.G)
@@ -112,7 +115,7 @@ class VascularNetwork(object):
                                 origin = origin,
                                 nCells = nCells,
                                 spacing = spacing,
-                                units=self.units)
+                                units=self.unitsL)
 
         # Initialize linear system to None for error handling
         self.Flow_matrix = self.Flow_rhs = None
@@ -173,8 +176,10 @@ class VascularNetwork(object):
             O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
 
             ## Find the bounding box
-            # To ensure full enclosure of the vessel, the bounding box is should
+            # To ensure full enclosure of the vessel, the bounding box should
             # bound the vessel extended by its radius in each direction
+            ### However, this seems to lead to cells being labelled twice
+            ### as vascular cells?
             p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
             cellMin, cellMax = self.mesh._BoundingBoxOfVessel(p1, p2, r)
 
@@ -248,7 +253,7 @@ class VascularNetwork(object):
         
             with multiprocessing.Pool(n_processes) as pool:
                 #chunksize=int(self.nVessels()/n_processes)
-                chunksize = 1 # Allows for progressbar, may be slower
+                chunksize = 1 # Allows progressbar, may be slower
                 
                 pool.starmap(_Label, tqdm(((edge, qLabel, qEndothelial, qVascular) for edge in self.G.edges(data=True)),
                                           desc="Labelling in progress",
@@ -359,8 +364,8 @@ class VascularNetwork(object):
         
         if (d < r-endotheliumThickness/2.0):
             newLabel = 1
-            #elif (d < r - endotheliumThickness/2.0 + 0.87*self.mesh.hmax): # 0.87~=sqrt(3)/2 which is the max distance to the center of the unit cube
-        elif (d<r+endotheliumThickness/2.0):
+        elif (d < r - endotheliumThickness/2.0 + 0.87*self.mesh.hmax): # 0.87~=sqrt(3)/2 which is the max distance to the center of the unit cube
+        #elif (d<r+endotheliumThickness/2.0):
             newLabel = 2
         else:
             newLabel = 0
@@ -385,24 +390,26 @@ class VascularNetwork(object):
         lines = vtk.vtkCellArray()
         radius = vtk.vtkDoubleArray()
         flow = vtk.vtkDoubleArray()
-        flow.SetName('flow')
-        radius.SetName("radius")
+        PO2  = vtk.vtkDoubleArray()
+        
+        flow.SetName(f'flow [{(self.unitsL**3)/self.unitsT}]')
+        radius.SetName(f"radius [{self.unitsL}]")
+        PO2.SetName(f"PO2 [nmol/{self.unitsL**3}]")
         for n1, n2, data in tqdm(self.G.edges(data=True), desc=f"Writing vessel data to {VTKFileName}"):
             line = vtk.vtkLine()
             line.GetPointIds().SetId(0, n1)
             line.GetPointIds().SetId(1, n2)
             lines.InsertNextCell(line)
             radius.InsertNextValue(data['radius'])
-            try:
-                flow.InsertNextValue(data['flow'])
-            except:
-                flow.InsertNextValue(0.0)
+            flow.InsertNextValue(data.get('flow', 0.0))
+            PO2.InsertNextValue(data.get('PO2', 0.0))
 
         # Create the polydata
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(points)
         polydata.GetCellData().AddArray(radius)
         polydata.GetCellData().AddArray(flow)
+        polydata.GetCellData().AddArray(PO2)
         polydata.SetLines(lines)
 
         # Write the polydata
@@ -512,7 +519,7 @@ class VascularNetwork(object):
         for n1, n2, data in self.G.edges(data=True):
             r = data['radius']
             l = data['length']
-            mu = self.Viscosity(r, hd=data['hd']) * 1e-3 # Converts to Pa.s
+            mu = self.Viscosity(r, hd=data['hd'])*self._cPConversionFactor  # Converts to Torr.(self.unitsT)
             self.G[n1][n2]['viscosity'] = mu
             R.append( (8*mu*l)/(np.pi*(r**4)))
         R = sp.dia_array(([R], [0]), shape=(len(R), len(R)))
@@ -521,7 +528,7 @@ class VascularNetwork(object):
 
         self.inletBC = inletBC
         self.outletBC = outletBC
-        unit = {'pressure':'mmHg', 'flow':self.units+'^3/s'}
+        unit = {'pressure':'mmHg', 'flow':self.unitsL**3/self.unitsT}
         
         nodeInlets = self.inletNodes
         nodeOutlets = self.outletNodes
@@ -537,7 +544,7 @@ class VascularNetwork(object):
         print(f'\tInlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
         # bcType is checked to be 'pressure' or 'flow' in the setter function 
         if bcType=='pressure':
-            bcValue *= 133.3224 # Assumes pressure was given in mmHg
+            bcValue *= self._TorrConversionFactor # Assumes pressure was given in mmHg=Torr
             D[nodeInlets] = 1.0
             pBar[nodeInlets] = bcValue
         else:
@@ -547,7 +554,7 @@ class VascularNetwork(object):
         bcType, bcValue = next(iter(self.outletBC.items()))
         print(f'\tOutlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
         if bcType=='pressure':
-            bcValue *= 133.3224 # Assumes pressure was given in mmHg
+            bcValue *= self._TorrConversionFactor # Assumes pressure was given in mmHg
             D[nodeOutlets] = 1.0
             pBar[nodeOutlets] = bcValue
         else:
@@ -564,17 +571,20 @@ class VascularNetwork(object):
         self.Flow_rhs    = np.concatenate([np.zeros(self.nVessels()),
                                            (I-D).dot(qBar) + D.dot(pBar)])
 
-        print(self)
-        
+        # print(self)        
         return
 
     def SolveFlow(self):
 
+        print(f"Solving for blood flow and pressure with boundary conditions:\n"
+              f"\t-Inlet {self.inletBC}\n"
+              f"\t-Outlet {self.outletBC}")
+        
         if (self.Flow_matrix is None) or (self.Flow_rhs is None):
             raise ValueError("Linear system has not been set yet.")
 
         x = scipy.sparse.linalg.spsolve(self.Flow_matrix, self.Flow_rhs)
-        f,p = x[:self.nVessels()], x[self.nVessels():]
+        f,p = x[:self.nVessels()], x[self.nVessels():]/self._TorrConversionFactor
         dp  = self.C.dot(p)
 
         # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
@@ -582,8 +592,6 @@ class VascularNetwork(object):
 
 
         # Compute error of the solver
-        self.Flow_loss = self.C.T.dot(f).sum()
-        print(f"Flow loss (C*f).sum() = {self.Flow_loss} with q_in={f.max()}.")
         self.Flow_loss = 0
         for i,e in enumerate(self.G.edges()): # Add the flow to vessel data
             n1, n2 = e
@@ -594,8 +602,10 @@ class VascularNetwork(object):
             elif not self.G.succ[n2]:
                 # An outlet
                 self.Flow_loss -= f[i]
-        print(f"Flow loss f_in-f_out = {self.Flow_loss}")
-        
+        print(f"\tFlow loss with max/min flow={f.max()}/{f.min()}, max/min pressure {p.max()}/{p.min()}:")
+        print(f"\t\tFlow loss f_in-f_out = {self.Flow_loss}")
+        print(f"\t\tFlow loss (C*f).sum() = {self.C.T.dot(f).sum()}")        
+                        
         return f,p,dp
     
     @property
@@ -718,15 +728,26 @@ class VascularNetwork(object):
         self._w = endotheliumThickness
         
     @property
-    def units(self) -> str:
+    def units(self) -> Dict[str,str]:
         return self._units
+    @property
+    def unitsL(self) -> str:
+        return self.units['length']
+    @property
+    def unitsT(self) -> str:
+        return self.units['time']
     @units.setter
-    def units(self, newUnits):
-        try:                    
-            self._lengthConversionFactor = self._lengthConversionDict[newUnits]
-        except:
-            raise KeyError(f"Wrong key '{newUnits}' for unit conversion. Valid keys are {self._lengthConversionDict.keys()}.")
-        self._units = newUnits
+    def units(self, newUnits : Dict[str, str]):
+        unitsL = u.Unit(newUnits.get('length', 'mm'))
+        unitsT = u.Unit(newUnits.get('time', 's'))
+        # try:                    
+        #     self._lengthConversionFactor = self._lengthConversionDict[unitsL]
+        # except:
+        #     raise KeyError(f"Wrong key '{unitsL}' for unit conversion. Valid keys are {self._lengthConversionDict.keys()}.")
+        self._units = {'length':unitsL, 'time':unitsT}
+        self._lengthConversionFactor   = u.cm.to(unitsL)
+        self._TorrConversionFactor     = u.torr.to(u.g / unitsL / (unitsT**2))
+        self._cPConversionFactor       = u.cP.to(u.g / unitsL / unitsT)
 
     @property
     def nVol(self):
@@ -751,7 +772,7 @@ class VascularNetwork(object):
                                 'um':1e4,
                                 'microns':1e4}
         try:
-            lengthConversion = lengthConversionDict[convertUnitsTo]
+            lengthConversion = lengthConversionDict[str(convertUnitsTo)]
             print(f"{lengthConversion=}")
         except:
             raise KeyError(f"Wrong key '{convertUnitsTo}' for unit conversion. Valid keys are {lengthConversionDict.keys()}")
@@ -834,7 +855,7 @@ class VascularNetwork(object):
         '''
         Radius should be in microns.
         '''
-        d = 2 * radius * self._lengthConversionDict['micron']/self._lengthConversionDict[self.units]
+        d = (2 * radius * self.unitsL).to_value(u.um)
         
         if Type=='Constant':
             return 3.6 # cP
@@ -854,7 +875,8 @@ class VascularNetwork(object):
         Vessels:
             Number of nodes: {self.nPoints}
             Number of segments: {self.nVessels()}
-            Length scale: {self.units}
+            Length scale: {self.unitsL}
+            Time scale: {self.unitsT}
             Bounding box: {[bb.tolist() for bb in self.BoundingBox()]}
             Maximum/Minimum radii: {self.maxRad}/{self.minRad}
             Inlet boundary condition: {self.inletBC}
