@@ -250,7 +250,7 @@ class UniformGrid(object):
             raise ValueError(f"Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
 
         xVoxelSpace = np.multiply(xarr, self.nCells) # Project onto voxel space
-        return xVoxelSpace.astype(int)
+        return np.floor(xVoxelSpace).astype(int)
         
     
     def CellCenter(self, ijk : Union[np.ndarray, List[int], int, Tuple[int]]) -> np.ndarray:

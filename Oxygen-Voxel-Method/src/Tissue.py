@@ -152,10 +152,22 @@ class Tissue(object):
         vesselData = self.Vessels.GetVesselData(['radius', 'length'])
         Gamma = np.ones(self.nPoints, dtype=np.float32)*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
         ## Use this one to cancel mass exchange with the inlet(s)
-        Gamma = np.array([1 if self.Vessels.G.predecessors(n) else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
+        Gamma = np.array([1 if (self.Vessels.G.predecessors(n) and self.Vessels.G.nodes[n]['stage']>=-1)
+                          else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
 
-        M = sp.diags(Gamma*U/self.endotheliumThickness,
+        # Gamma = np.divide(np.array([0 if self.Vessels.G[n].get('stage', 0)<-1
+        #                             else self.endotheliumThickness
+        #                             for n in self.Vessels.G.nodes()]),
+        #                   Gamma)
+
+        #Gamma = np.divide(Gamma, np.array([1e33 if self.Vessels.G[n].get('stage', -1)>0 else self.endotheliumThickness for n in self.Vessels.G.nodes()]))
+        
+        # Trying to cancel mass transfer for out of FOV vessels
+        M = sp.diags(Gamma*U,
                      offsets=0, format='csr', dtype=np.float32)
+        
+        # M = sp.diags(Gamma*U/self.endotheliumThickness,
+        #              offsets=0, format='csr', dtype=np.float32)
         del Gamma
         # M = self.C3[1:,1:].T.dot(M.dot(self.C3[1:, 1:]))
         M = self.C3.T.dot(M.dot(self.C3))
@@ -341,12 +353,12 @@ class Tissue(object):
                 M[node, node] = 1
             
             for otherNode in successors:
-                flow = self.Vessels.G[node][otherNode]['flow']
+                flow = self.Vessels.G[node][otherNode]['flow'] * self.Vessels.G[node][otherNode]['length']
                 length = self.Vessels.G[node][otherNode]['length']
                 # Upwind scheme?
-                M[otherNode, node] = -flow/length
-                M[otherNode, otherNode] = flow/length
-
+                M[otherNode, node] = -1./length
+                M[otherNode, otherNode] = 1./length
+        
         print('Done.')
 
         if saveIn:
@@ -445,7 +457,7 @@ class Tissue(object):
                                                self.A.data), comm=comm)
 
         solverType = 'pgmres' #'bcgs'
-        precondType = 'ilu'
+        precondType = 'bjacobi' #'ilu'
         ksp = PETSc.KSP().create(comm=comm)
         ksp.setType(solverType)
         ksp.setMonitor(monitor)

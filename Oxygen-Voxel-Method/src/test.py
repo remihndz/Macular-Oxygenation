@@ -39,7 +39,8 @@ D = 1800 * u.um*u.um/u.s # Diffusion in um^2/s
 c0 = 50 * u.torr
 kt = 4.5 / u.min 
 Tb = 309.25 * u.K    # Blood temperature, 36.1*C in Kelvin
-spacing = u.Quantity([5, 5, 50], 'micron')
+spacing = u.Quantity([5, 5, 8], 'micron')
+#dimensions = u.Quantity([30, 30, 10], 'mm')
 dimensions = u.Quantity([200,400,400],'micron')
 origin  = u.Quantity([-100, -200, -200], 'micron')
 
@@ -64,8 +65,8 @@ print(f"""Simulation coefficients:
 #vessels = VascularNetwork.VascularNetwork('1Vessel.cco', spacing = [w*2, w*2, w*2])
 #tissue = Tissue.Tissue(Vessels = vessels)
 #tissue = Tissue.Tissue(ccoFile='sim_19.cco', w=w, spacing=spacing, units=units) # Large-ish network
-tissue = Tissue.Tissue(ccoFile='1Vessel.cco', units=units, w=w, spacing=spacing, dimensions=dimensions.to_value(unitsL), origin=origin.to_value(unitsL)) # One vessel
-#tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w, spacing=spacing, units=units)
+#tissue = Tissue.Tissue(ccoFile='1Vessel.cco', units=units, w=w, spacing=spacing, dimensions=dimensions.to_value(unitsL), origin=origin.to_value(unitsL)) # One vessel
+tissue = Tissue.Tissue(ccoFile='Patient1.cco', w=w, spacing=spacing, units=units, dimensions=u.Quantity([4.5, 4.0, 0.235], 'mm').to_value(unitsL), origin=u.Quantity([-2.26,-1.95,-0.235], 'mm').to_value(unitsL))
 
 # tissue.Vessels.SetLinearSystem(inletBC={'flow':f_CRA.value},
 #                                outletBC={'pressure':25})
@@ -102,6 +103,7 @@ ax[1].scatter(radius, dp)
 ax[1].set(xlabel=f'Radius [{unitsL}]', ylabel=f'Pressure drop [mmHg]', yscale='log')
 
 plt.show()
+
 
 tissue.VesselsToVTK('Vessels.vtp')
 plt.plot(xb, label="Blood concentration")
