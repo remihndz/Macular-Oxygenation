@@ -1,6 +1,6 @@
 from VascularNetwork import VascularNetwork
 # from Mesh import UniformGrid
-import networkx as nx
+import networkx
 import scipy.sparse as sp
 import scipy.sparse.linalg
 from NDSparseMatrix import SparseRowIndexer
@@ -142,38 +142,55 @@ class Tissue(object):
         Parameters
         ----------
         U : float
-            Transmembrane permeability coefficient.
+            Transmembrane permeability coefficient (in L/T). 
         saveIn : str
             Optional, saves the matrix in the file in .npz format.
         """
 
         print("Assembling the mass transfer coefficients matrix", end='....')
             
-        vesselData = self.Vessels.GetVesselData(['radius', 'length'])
-        Gamma = np.ones(self.nPoints, dtype=np.float32)*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
-        ## Use this one to cancel mass exchange with the inlet(s)
-        Gamma = np.array([1 if (self.Vessels.G.predecessors(n) and self.Vessels.G.nodes[n]['stage']>=-1)
-                          else 0 for n in self.Vessels.G.nodes()])*np.sum(2*np.pi*vesselData['radius']*vesselData['length'])
+        ## Use this one to cancel mass exchange with the inlet(s) and the 'backbone'
+        permeability = U/self.endotheliumThickness # U = K_w/alpha with alpha solubility of O2
+        # Gamma = np.array([permeability/self.Vessels.G[next(self.Vessels.G.predecessors(n))][n]['length']
+        #                   if (self.Vessels.G.predecessors(n) and self.Vessels.G.nodes[n]['stage']>=-1)
+        #                   else 0 for n in self.Vessels.G.nodes()])
 
-        # Gamma = np.divide(np.array([0 if self.Vessels.G[n].get('stage', 0)<-1
-        #                             else self.endotheliumThickness
-        #                             for n in self.Vessels.G.nodes()]),
-        #                   Gamma)
 
-        #Gamma = np.divide(Gamma, np.array([1e33 if self.Vessels.G[n].get('stage', -1)>0 else self.endotheliumThickness for n in self.Vessels.G.nodes()]))
+        # Gamma = np.array([1 if self.Vessels.G.predecessors(n)
+        #                   else 0 for n in self.Vessels.G.nodes()])*permeability
         
-        # Trying to cancel mass transfer for out of FOV vessels
-        M = sp.diags(Gamma*U,
-                     offsets=0, format='csr', dtype=np.float32)
+        # M = sp.diags(Gamma, offsets=0, format='csr', dtype=np.float32)
         
         # M = sp.diags(Gamma*U/self.endotheliumThickness,
         #              offsets=0, format='csr', dtype=np.float32)
-        del Gamma
+        # del Gamma
         # M = self.C3[1:,1:].T.dot(M.dot(self.C3[1:, 1:]))
-        M = self.C3.T.dot(M.dot(self.C3))
+        # M = self.C3.T.dot(M.dot(self.C3))
         # M = self.CellToSegment.T @ M @ self.CellToSegment # Here @ is the matrix-matrix product for scipy sparse_arrays
         
         # Add the equations linking vascular cells with vascular nodes
+        M = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol))
+        nodesPosition = np.array([self.Vessels.G.nodes[n]['position']
+                                  if self.Vessels.G.predecessors(n)
+                                  else np.array((np.inf, np.inf, np.inf))
+                                  for n in range(self.nPoints)])
+
+        inletNodes = self.Vessels.inletNodes
+        for index3D, label in self.labels.elements.items():
+            if label==2:
+                cellPos = self.Mesh.CellCenter(index3D)
+                closestNode = np.argmin(np.linalg.norm(nodesPosition-cellPos, axis=1))
+                if closestNode in inletNodes:
+                    closestNode = next(self.Vessels.G.successors(closestNode))
+
+                if self.Vessels.G.nodes[closestNode]['stage']>=-1:
+                    flatId = self.nPoints+self.Mesh.ToFlatIndexFrom3D(index3D)
+                    M[flatId, closestNode] = -permeability
+                    M[flatId, flatId] = permeability
+                    M[closestNode, closestNode] += permeability
+                    M[closestNode, flatId] -=permeability
+
+                
         M = M + sp.vstack([sp.csr_matrix((self.nPoints, self.nPoints+self.nVol)), sp.hstack([-self.C4, self.I4])])
         
         # del self.C4
@@ -214,7 +231,7 @@ class Tissue(object):
         print(f"\n\tReaction rate {kt=}")
         print(f"\tDiffusion rate {D=}")
         spacing = self.dx
-        v = np.prod(self.Mesh.dimensions) # Dimensions of the slab of tissue 
+        v = 1.0 #np.prod(self.Mesh.dimensions) # Dimensions of the slab of tissue 
         nx, ny,nz  = self.nx
         dx,dy,dz = spacing
 
@@ -343,24 +360,45 @@ class Tissue(object):
         
         # Possible gain in time by going through inlet node (i.e., in_degree==0)
         # then make another loop for the non inlets.
-        M = sp.lil_matrix((self.nPoints+self.nVol, self.nPoints+self.nVol), dtype=np.float32)
-        for node in self.Vessels.G.nodes():
-            successors = self.Vessels.G.successors(node)
-            
-            if not self.Vessels.G.pred[node]: 
-                # It is an inlet node
-                print(f"Inlet node equation at row {node}")
-                M[node, node] = 1
-            
-            for otherNode in successors:
-                flow = self.Vessels.G[node][otherNode]['flow'] * self.Vessels.G[node][otherNode]['length']
-                length = self.Vessels.G[node][otherNode]['length']
-                # Upwind scheme?
-                M[otherNode, node] = -1./length
-                M[otherNode, otherNode] = 1./length
-        
-        print('Done.')
+        # K = -1.0 * networkx.incidence_matrix(self.Vessels.G, oriented=True).T
+        # for i in self.Vessels.inletNodes:
+        #     K.indptr = np.insert(K.indptr, K.indptr[i],i)
+        #     K._shape = (K.shape[0]+1, K.shape[1])
+        #     K[i,i] = 1.0
 
+        # K = K.tolil()
+        #data, rows = K.data, K.rows        
+        # for i, edge in enumerate(zip(data,rows)):
+        #     k, cols = np.array(edge[0]), np.array(edge[1])
+        #     if 0<=i<=3:
+        #         print(i, k, cols)
+        #     # k = -1 for start of vessel, 1 otherwise
+        #     try:
+        #         n1, n2 = cols[k==1][0], cols[k==-1][0]
+        #         v, l = self.Vessels.GetVelocity((n1,n2)), self.Vessels.G[n1][n2]['length']
+        #         K.data[i] = [-val*v/l for val in K.data[i]]
+        #     except IndexError:
+        #         print(f"Inlet node at row {i}, node {cols}")
+        #         pass
+
+        K = sp.lil_matrix((self.nPoints, self.nPoints))
+        inlets = self.Vessels.inletNodes
+        for n1 in self.Vessels.G.nodes():
+            if n1 in inlets:
+                K[n1,n1] = 1.0
+                
+            for n2 in self.Vessels.G.successors(n1):
+                v, l = self.Vessels.GetVelocity((n1,n2)), self.Vessels.G[n1][n2]['length']
+                K[n2,n2] = -v/l
+                K[n2,n1] = v/l
+            
+        K = K.tocsr()
+        M = sp.csr_matrix((K.data,
+                           K.indices,
+                           np.pad(K.indptr, (0, self.nVol), "edge")),
+                          shape=(self.nPoints+self.nVol, self.nPoints+self.nVol))
+        print('Done.')
+        
         if saveIn:
             sp.save_npz(saveIn, M.tocsr()[:self.nPoints,:self.nPoints])
 
@@ -403,7 +441,8 @@ class Tissue(object):
         print(' Done.')
         return
 
-    def Solve(self, checkForEmptyRows : bool=False):
+    def Solve(self, checkForEmptyRows : bool=False, solver='pgmres', preconditioner='bjacobi', maxIter=5e3):
+
         self.A = self.A.tocsr()
         self.A.eliminate_zeros()
 
@@ -456,14 +495,16 @@ class Tissue(object):
                                                self.A.indices,
                                                self.A.data), comm=comm)
 
-        solverType = 'pgmres' #'bcgs'
-        precondType = 'bjacobi' #'ilu'
+        solverType = solver #'bcgs'
+        precondType = preconditioner #'ilu' # 'bjacobi'
         ksp = PETSc.KSP().create(comm=comm)
         ksp.setType(solverType)
         ksp.setMonitor(monitor)
         pc = ksp.getPC()
         pc.setType(precondType)
-        ksp.setTolerances(rtol=1e-8, max_it=1000)            
+        ksp.setTolerances(rtol=1e-6, max_it=maxIter)
+        ksp.view()
+        ksp.setConvergenceHistory()
 
         print(f"Solving with PETSc and {ksp.getType()} (preconditionner: {pc.getType()})")
 
@@ -475,16 +516,23 @@ class Tissue(object):
         xpetsc.setUp()
         ksp.solve(b, xpetsc)
         x = xpetsc.getArray()
+
+        print("\tConvergence details")
+        print(f"\t\tTime for solver ({ksp.getIterationNumber()} iter.): {time()-t}")
+        print(f"\t\t{ksp.getConvergedReason()=} {ksp.getResidualNorm()=} ")
+
+        plt.semilogy(ksp.getConvergenceHistory(), '-.')
+        plt.title(f"Convergence history of PETSc {ksp.getType()} solver\nwith {pc.getType()} precondictionning.")
+        
         del ksp
         del petsc_mat
         del b
         del xpetsc
         
-        for i, e in enumerate(self.Vessels.G.edges()):
-            self.Vessels.G[e[0]][e[1]]['PO2'] = x[i]
+        for n in self.Vessels.G.nodes():
+            self.Vessels.G.nodes[n]['PO2'] = x[n]
         
-        print("Time for solver: ", time()-t)
-        return x[list(nx.topological_sort(self.Vessels.G))], x[self.nPoints:]
+        return x[list(networkx.topological_sort(self.Vessels.G))], x[self.nPoints:]
     
     
     def VesselsToVTK(self, VTKFileName : str):

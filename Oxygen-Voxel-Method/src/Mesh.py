@@ -260,7 +260,7 @@ class UniformGrid(object):
             ijkarr = np.array(ijk).reshape((3,)) 
         if np.any(ijkarr-self.nCells > 0):
             raise ValueError(f"Indices {ijkarr.tolist()} out of bounds for the grid.")        
-        cellCenter = self.origin + self.spacing * ijkarr
+        cellCenter = self.origin + self.spacing * (ijkarr+0.5)
         return cellCenter
 
     @staticmethod

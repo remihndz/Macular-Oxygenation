@@ -269,7 +269,6 @@ class VascularNetwork(object):
         i,j,k = cellId
                     
         cellCenter = self.mesh.CellCenter(cellId)
-
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center           
         
         if (d < r-endotheliumThickness/2.0):
@@ -304,7 +303,8 @@ class VascularNetwork(object):
         
         flow.SetName(f'flow [{(self.unitsL**3)/self.unitsT}]')
         radius.SetName(f"radius [{self.unitsL}]")
-        PO2.SetName(f"PO2 [nmol/{self.unitsL**3}]")
+        PO2.SetName(f"PO2 [mmHg]")
+        
         for n1, n2, data in tqdm(self.G.edges(data=True), desc=f"Writing vessel data to {VTKFileName}"):
             line = vtk.vtkLine()
             line.GetPointIds().SetId(0, n1)
@@ -312,14 +312,16 @@ class VascularNetwork(object):
             lines.InsertNextCell(line)
             radius.InsertNextValue(data['radius'])
             flow.InsertNextValue(data.get('flow', 0.0))
-            PO2.InsertNextValue(data.get('PO2', 0.0))
+
+        for n, p in (self.G.nodes(data='PO2')):
+            PO2.InsertNextValue(p)
 
         # Create the polydata
         polydata = vtk.vtkPolyData()
         polydata.SetPoints(points)
         polydata.GetCellData().AddArray(radius)
         polydata.GetCellData().AddArray(flow)
-        polydata.GetCellData().AddArray(PO2)
+        polydata.GetPointData().AddArray(PO2)
         polydata.SetLines(lines)
 
         # Write the polydata
@@ -376,6 +378,12 @@ class VascularNetwork(object):
             # Repeat the process with the newly created vessels                    
             vesselsToSplit = newVesselsToSplit
 
+        # tmpLabels, newLabels = {}, {}
+        # for i,n in enumerate(nx.topological_sort(self.G)):
+        #     tmpLabels[n]=-n
+        #     newLabels[-n]=i
+        # self.G=nx.relabel_nodes(self.G, tmpLabels, copy=False)
+        # self.G=nx.relabel_nodes(self.G, newLabels, copy=False)
         print(f"Vascular repartion has required {nSplit} splitings.")       
 
 
@@ -401,10 +409,10 @@ class VascularNetwork(object):
         self.G.remove_edge(edge[0], edge[1])
         # print(f"Removed {edge=}.") 
         # First segment
-        dataDict['length'] /= 2.0 #np.linalg.norm(newNodePos-self.G.nodes[edge[0]]['position'])
+        dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[0]]['position'])
         self.G.add_edge(edge[0], newNode, **dataDict)
         # Second segment
-        #dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[1]]['position'])
+        dataDict['length'] = np.linalg.norm(newNodePos-self.G.nodes[edge[1]]['position'])
         self.G.add_edge(newNode, edge[1], **dataDict)
 
         # print(f"Created edges {(edge[0], newNode)} and {(newNode, edge[1])} with length {self.G[edge[0]][newNode]['length']}")
@@ -519,7 +527,9 @@ class VascularNetwork(object):
             elif not self.G.succ[n2]:
                 # An outlet
                 self.Flow_loss -= f[i]
-        print(f"\tFlow loss with max/min flow={f.max()}/{f.min()}, max/min pressure {p.max()}/{p.min()}:")
+
+        v = np.array([self.GetVelocity(e) for e in self.G.edges()])
+        print(f"\tFlow loss with max/min velocity={v.max()}/{v.min()}, max/min flow={f.max()}/{f.min()}, max/min pressure {p.max()}/{p.min()}:")
         print(f"\t\tFlow loss f_in-f_out = {self.Flow_loss}")
         print(f"\t\tFlow loss (C*f).sum() = {self.C.T.dot(f).sum()}")        
                         
@@ -672,7 +682,10 @@ class VascularNetwork(object):
     @property
     def nPoints(self):
         return self.nNodes()
-    
+
+    def GetVelocity(self, segment : tuple) -> float:
+        n1,n2 = segment
+        return self.G[n1][n2]['flow']/((self.G[n1][n2]['radius']**2)*np.pi)
 
     def BoundingBox(self):
         nodes = np.array([self.G.nodes[n]['position'] for n in self.G.nodes])
@@ -759,8 +772,13 @@ class VascularNetwork(object):
 
             G.add_node(0, position=edges[rootId]['start'], stage=-2)
             AddVesselToGraph(rootId, 0)                
-            print(f"{(len(edges)==0)=}")
-        return G
+            
+            nodeToRemove = [n for n,stage in G.nodes(data='stage')
+                            if stage==-2 ]
+            for node in nodeToRemove:
+                G.remove_node(node)
+
+        return nx.convert_node_labels_to_integers(G)
 
     
     @staticmethod
