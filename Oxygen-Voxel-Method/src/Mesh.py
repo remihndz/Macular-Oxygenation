@@ -99,8 +99,11 @@ class UniformGrid(object):
         if np.all(np.array(dims) > 0.0) and np.array(dims).size==3:
             self._dimensions = u.Quantity(dims, self.lengthScale).value.reshape((3,))
         else:
-            raise ValueError("Please enter valid dimensions.")
+            raise ValueError(f"Please enter valid dimensions: {dims}.")
 
+    @property
+    def nVol(self):
+        return self.nCellsTotal
     @property
     def origin_withUnit(self):
         return u.Quantity(self._origin, self.lengthScale)
@@ -188,6 +191,9 @@ class UniformGrid(object):
         '''
         Returns False if labels[cellId] has not been updated.
         '''
+        if np.any(np.array(cellId) < 0) or np.any(np.array(cellId) > np.array(self.nCells)-1):
+            print(f"Ignoring call to label cell {cellId} because out of bound for mesh.")
+            return False
         oldLabel = self.labels.readValue(cellId)
         updateValue = False
         # Vessel label takes priority over other labels
@@ -282,7 +288,7 @@ class UniformGrid(object):
         # bounding boxes of its caps (the disk faces)
         bboxes = np.array([p1 - n, p1 + n, p2 - n, p2 + n])
         cellMin, cellMax = self.PointToCell(bboxes.min(axis=0)), self.PointToCell(bboxes.max(axis=0))
-        return cellMin, cellMax
+        return np.maximum(cellMin, [0,0,0]), np.minimum(cellMax, self.nCells-1)
 
     def ToNumpy(self) -> np.ndarray:
         arr = np.zeros((self.nCells))
@@ -320,6 +326,49 @@ class UniformGrid(object):
             f.write("\n")
             f.write("\n".join(tqdm(self.labels, desc=f"Writing labels to {VTKFileName}"))) #, total=self.nCellTotal)))        
         return     
+
+    def MakePoissonWithChoroid(self, D):
+        nx,ny,nz = self.nCells
+        dx,dy,dz = self.spacing
+
+        coeffs = [D/dz/dz, D/dy/dy, D/dx/dx, # Lower diagonals
+                  0,        # Main diagonal, coeff is set below
+                  D/dz/dz, D/dy/dy, D/dx/dx] # Upper diagonals
+        coeffs[3] = -sum(coeffs)
+        offsets = [-nx*ny, -nx, -1,  # Lower diagonals
+                   0,                                     # Main diagonal
+                   nx*ny, nx, 1]     # Upper diagonals
+
+        M = sp.diags(coeffs, offsets, shape=(self.nCellsTotal, self.nCellsTotal), format='lil')
+                # Diffusion with homogeneous Neumann BC
+        nx,ny,nz = self.nCells
+        for k in range(nz):
+            for j in range(ny):
+                for i in range(nx):
+                    cellId = i + nx*j + nx*ny*k
+                    if i==0:
+                        if cellId-1>=0:
+                            M[cellId, cellId-1] = 0.0
+                        M[cellId, cellId] += coeffs[2]
+                    elif i==nx-1:
+                        if cellId+1<M.shape[1]:
+                            M[cellId, cellId+1] = 0.0
+                        M[cellId, cellId] += coeffs[2]
+                    if j==0:
+                        if cellId-nx>=0:
+                            M[cellId, cellId-nx] = 0.0
+                        M[cellId, cellId] += coeffs[1] 
+                    elif j==ny-1:
+                        if cellId+nx<M.shape[1]:
+                            M[cellId, cellId+nx] = 0.0
+                        M[cellId, cellId] += coeffs[1]
+                    if k==0: # Here boundary condition is the choroid (=Robin or Dirichlet BC)
+                        pass
+                        # M[cellId, cellId] += coeffs[0]
+                    elif k==nz-1:
+                        M[cellId, cellId] += coeffs[0]
+                        
+        return M.tolil() # Return -div(Dgrad)
 
     def MakePoissonWithNeumannBC(self, D):
         
@@ -359,12 +408,16 @@ class UniformGrid(object):
                             M[cellId, cellId+nx] = 0.0
                         M[cellId, cellId-nx] *= 2.0
                     if k==0:
-                        if cellId-nx*ny>=0:
-                            M[cellId, cellId-nx*ny] = 0.0
-                        M[cellId, cellId+nx*ny] *= 2.0
+                        ## Unnecessary check
+                        # if cellId-nx*ny>=0:
+                        #     M[cellId, cellId-nx*ny] = 0.0
+                        #M[cellId, cellId+nx*ny] *= 2.0
+                        pass
                     elif k==nz-1:
-                        if cellId+nx*ny<M.shape[1]:
-                            M[cellId, cellId+nx*ny] = 0.0
+                        ## Unnecessary check
+                        # if cellId+nx*ny<M.shape[1]:
+                        #     print("Necessary")
+                        #     M[cellId, cellId+nx*ny] = 0.0
                         M[cellId, cellId-nx*ny] *= 2.0
                         
         return M.tolil()  # Return -div(Dgrad)
@@ -436,3 +489,7 @@ class UniformGrid(object):
             f"origin={self.origin}, " \
             f"nCells={self.nCells}," \
             f"spacing={self.spacing})"
+
+class RectilinearGrid(UniformGrid):
+    def __init__(self, dimensions=u.Quantity([1, 1, 1], u.cm), origin=u.Quantity([0, 0, 0], u.cm), nCells=[20, 20, 20], spacing=None, units='mm'):
+        super().__init__(dimensions, origin, nCells, spacing, units)

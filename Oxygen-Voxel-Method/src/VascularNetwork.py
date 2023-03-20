@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import Node
 import pandas as pd
 import networkx as nx
-from Mesh import UniformGrid
+from Mesh import UniformGrid, RectilinearGrid
 from math import isclose
 import scipy.sparse as sp
 import scipy.sparse.linalg
@@ -15,15 +15,570 @@ import multiprocessing
 import sys
 from astropy import units as u
 
+class DAG(nx.DiGraph):
+    def __init__(self, units : Dict[str,str], incoming_graph_data=None, **attr):
+        super().__init__(incoming_graph_data, **attr)
+        self.units = units
+    
+    @property
+    def units(self) -> Dict[str,str]:
+        return self._units
+    @property
+    def unitsL(self) -> str:
+        return self.units['length']
+    @property
+    def unitsT(self) -> str:
+        return self.units['time']
+    @units.setter
+    def units(self, newUnits : Dict[str, str]):
+        unitsL = u.Unit(newUnits.get('length', 'mm'))
+        unitsT = u.Unit(newUnits.get('time', 's'))
+
+        try:
+            convertL = unitsL/self._unitsL
+            convertT = unitsT/self._unitsT
+            newPos = {n:{'position':pos*convertL} for n,pos in self.nodes(data='position')}
+            newEdgeData = {(n1,n2):{'length':data['length']*convertL, 
+                            'flow':data['flow'] / convertT * (convertL**3),
+                            'radius':data['radius']*convertL} for n1,n2,data in self.edges(data=True)}
+            nx.set_edge_attributes(self, newEdgeData)
+            nx.set_node_attributes(self, newPos)
+            del newPos
+            del newEdgeData
+        except AttributeError:
+            # This is the first setting of units.
+            pass 
+
+        self._units = {'length':unitsL, 'time':unitsT}
+        self._lengthConversionFactor   = u.cm.to(unitsL)
+        self._TorrConversionFactor     = u.torr.to(u.g / unitsL / (unitsT**2))
+        self._cPConversionFactor       = u.cP.to(u.g / unitsL / unitsT)
+
+    @property
+    def nNodes(self) -> int:
+        return self.number_of_nodes()
+    @property
+    def nVessels(self) -> int:
+        return self.number_of_edges()
+    
+    def nodes_ordered(self, data = False):
+        '''
+        An ordered traversal of the DAG.
+        '''
+        if isinstance(data, str):
+            return ((n, self.nodes[n][data]) for n in nx.topological_sort(self))
+        elif data==True:
+            return ((n, self.nodes[n]) for n in nx.topological_sort(self))
+        else:
+            return nx.topological_sort(self)
+
+    @property
+    def C(self):
+        if hasattr(self, '_C'):
+            pass
+        else:
+            self._C = sp.lil_matrix((self.nNodes, self.nVessels))
+            for i, (n1,n2) in enumerate(self.edges()):
+                self._C[n1, i] = 1.0
+                self._C[n2, i] = -1.0
+        return self._C.T
+
+    @property
+    def inletNodes(self) -> List[int]:
+        return [x for x in self.nodes() if self.in_degree(x)==0]
+    @property
+    def outletNodes(self) -> List[int]:
+        return [x for x in self.nodes() if self.out_degree(x)==0]
+    @property
+    def Resistances(self):
+        ## Resistance matrix
+        R = []
+        for n1, n2, data in self.edges(data=True):
+            r = data['radius']
+            l = data['length']
+            mu = self.Viscosity(r, hd=data['hd'])
+            self[n1][n2]['viscosity'] = mu
+            mu *= self._cPConversionFactor  # Converts to Torr.(self.unitsT)            
+            R.append( (8*mu*l)/(np.pi*(r**4)))
+        R = sp.dia_array(([R], [0]), shape=(len(R), len(R)))
+        return R
+
+    def GetVelocity(self, segment : tuple) -> float:
+        n1,n2 = segment
+        return self[n1][n2]['flow']/((self[n1][n2]['radius']**2)*np.pi)
+    
+    def SetLinearSystem(self, inletBC : Dict[str, float]={'pressure':100},
+                        outletBC : Dict[str, float]={'pressure':26}):
+        ## TODO: add the plasma skimming effect
+        print("Setting the linear system for blood flow...")
+        ## Boundary conditions
+
+        self.inletBC = inletBC
+        self.outletBC = outletBC
+        unit = {'pressure':'mmHg', 'flow':self.unitsL**3/self.unitsT}
+        
+        nodeInlets = self.inletNodes
+        nodeOutlets = self.outletNodes
+        # print(f'{nodeInlets=}\n{nodeOutlets=}')
+        
+        D = np.zeros((self.nNodes,)) # Decision matrix
+        qBar = np.zeros((self.nNodes,)) # RHS
+        pBar = np.zeros((self.nNodes,)) # RHS
+
+        ## Define inlet boundary condition
+    
+        bcType, bcValue = next(iter(self.inletBC.items()))
+        print(f'\tInlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
+        # bcType is checked to be 'pressure' or 'flow' in the setter function 
+        if bcType=='pressure':
+            bcValue *= self._TorrConversionFactor # Assumes pressure was given in mmHg=Torr
+            D[nodeInlets] = 1.0
+            pBar[nodeInlets] = bcValue
+        else:
+            qBar[nodeInlets] = bcValue
+            
+        # Define outlet boundary condition
+        bcType, bcValue = next(iter(self.outletBC.items()))
+        print(f'\tOutlet boundary condition is {bcType}={bcValue}{unit[bcType]}')
+        if bcType=='pressure':
+            bcValue *= self._TorrConversionFactor # Assumes pressure was given in mmHg
+            D[nodeOutlets] = 1.0
+            pBar[nodeOutlets] = bcValue
+        else:
+            qBar[nodeOutlets] = bcValue
+
+        D = sp.dia_matrix(([D],[0]), shape = (self.nNodes, self.nNodes),
+                         dtype=np.float32)
+        I = sp.dia_matrix(sp.eye(D.shape[0]), dtype=np.float32) 
+        R = self.Resistances      
+        self.Flow_matrix = sp.vstack([sp.hstack([R, -self.C], dtype=np.float32),
+                                      sp.hstack([(I-D).dot(self.C.T), D])],
+                                     format='csr', dtype=np.float32)
+
+        self.Flow_rhs    = np.concatenate([np.zeros(self.nVessels),
+                                           (I-D).dot(qBar) + D.dot(pBar)])
+
+        del R
+        del D
+        del I
+        return
+
+    def SolveFlow(self):
+        if not (hasattr(self, 'Flow_matrix') and hasattr(self, 'Flow_rhs')):
+            print("Set the linear system first with 'SetLinearSystem({inletBC:value}, {outletBC:value})'.")
+            return
+        
+        x = scipy.sparse.linalg.spsolve(self.Flow_matrix, self.Flow_rhs)
+        f,p = x[:self.nVessels], x[self.nVessels:]/self._TorrConversionFactor
+        dp  = self.C.dot(p)
+
+        # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
+        # assert p.size==self.nNodes, f"Nodal pressure vector has wrong size. Expected {self.nNodes} and got {p.size}."
+
+
+        # Compute error of the solver
+        self.Flow_loss = 0
+        for i,e in enumerate(self.edges()): # Add the flow to vessel data
+            n1, n2 = e
+            self[n1][n2].update(flow=f[i], dp=dp[i])
+            if not self.pred[n1]:
+                # An inlet
+                self.Flow_loss += f[i]
+            elif not self.succ[n2]:
+                # An outlet
+                self.Flow_loss -= f[i]
+
+        v = np.array([self.GetVelocity(e) for e in self.edges()])
+        print(f"\tFlow loss with max/min velocity ({self.unitsL/self.unitsT})={v.max()}/{v.min()}\n\tmax/min flow ({self.unitsL**3/self.unitsT})={f.max()}/{f.min()}\n\tmax/min pressure (mmHg)={p.max()}/{p.min()}:")
+        print(f"\t\tFlow loss f_in-f_out = {self.Flow_loss}")
+        print(f"\t\tFlow loss (C*f).sum() = {self.C.T.dot(f).sum()}")        
+                        
+        return (f,p,dp)
+        
+    def Repartition(self, mesh:RectilinearGrid, maxDist=1):
+        '''
+        Split vessels so that end nodes are at most maxDist cells away
+        from each other.
+        '''
+        nSplit = 0
+        if maxDist < 1:
+            maxDist = 1
+        lmin = min(mesh.spacing)/3.0
+        
+        vesselsToSplit = []
+        for e in list(self.edges()):
+            # e is a tuple (n1,n2)
+            x1, x2 = self.nodes[e[0]]['position'], self.nodes[e[1]]['position']
+            stage1, stage2 = self.nodes[e[0]]['stage'], self.nodes[e[1]]['stage']
+            if stage1<-1 or stage2<-1: # skip that vessel if it is part of the 'backbone'
+                pass
+            
+            cell1, cell2 = mesh.PointToCell(x1), mesh.PointToCell(x2)
+            
+            if mesh.Dist(cell1, cell2) > maxDist:
+                # print(f"edge {e} added to the list of vessels to split.")
+                vesselsToSplit.append(e)
+
+        # First split those vessels
+        while vesselsToSplit:
+            newVesselsToSplit = []
+            
+            for e in vesselsToSplit:
+                # print(f"Splitting {e}.")
+                newEdges = self._SplitVessel(e)
+                nSplit+=1
+
+                # Check whether the new vessels need to be split again
+                for newEdge in newEdges:
+                    x1, x2 = self.nodes[newEdge[0]]['position'], self.nodes[newEdge[1]]['position']
+                    cell1, cell2 = mesh.PointToCell(x1), mesh.PointToCell(x2)
+                    
+                    if mesh.Dist(cell1, cell2) > maxDist and np.linalg.norm(x1-x2)>lmin:
+                        newVesselsToSplit.append(newEdge)
+                    
+            # Repeat the process with the newly created vessels                    
+            vesselsToSplit = newVesselsToSplit
+
+        print(f"Vascular repartion has required {nSplit} splitings.")      
+        tmpLabels, newLabels = {}, {}
+        for i,n in enumerate(nx.topological_sort(self)):
+            tmpLabels[n]=-n
+            newLabels[-n]=i
+        nx.relabel_nodes(self, tmpLabels, copy=False)
+        nx.relabel_nodes(self, newLabels, copy=False)
+
+    def _SplitVessel(self, edge : tuple):
+        '''
+        Split edge into two segments by adding a node in the middle.
+        edge is a tuple (n1,n2) of the nodes forming the segment.
+        '''
+        ## Create new node
+        newNode = self.nNodes+1
+        ## Should be an unused name
+        assert not newNode in list(self.nodes), f"Node name {newNode} already exists."
+
+        # Add the new node to the list of nodes
+        newNodePos = (self.nodes[edge[0]]['position'] + self.nodes[edge[1]]['position'])/2.0
+        newNodeStage = self.nodes[edge[0]]['stage'] # inherits the stage from upstream node
+        self.add_node(newNode, position=newNodePos, stage=newNodeStage)
+
+        # print(f'Added node {newNode} {self[newNode]=}')
+
+        ## Update the connectivity
+        dataDict = self[edge[0]][edge[1]]
+        self.remove_edge(edge[0], edge[1])
+        # print(f"Removed {edge=}.") 
+        # First segment
+        dataDict['length'] = np.linalg.norm(newNodePos-self.nodes[edge[0]]['position'])
+        self.add_edge(edge[0], newNode, **dataDict)
+        # Second segment
+        dataDict['length'] = np.linalg.norm(newNodePos-self.nodes[edge[1]]['position'])
+        self.add_edge(newNode, edge[1], **dataDict)
+        
+        return (edge[0], newNode), (newNode, edge[1])
+        
+    def BoundingBox(self):
+        nodes = np.array([self.nodes[n]['position'] for n in self.nodes])
+        return (np.min(nodes, axis=0), np.max(nodes, axis=0))  
+    
+    def CreateGraph(self, ccoFile : str) -> nx.DiGraph:
+
+        lengthConversionDict = {'m':1e-2,
+                                'mm':1e1,
+                                'cm':1.0,
+                                'micron':1e4,
+                                'mum':1e4,
+                                'um':1e4,
+                                'microns':1e4}
+        lengthConversion = lengthConversionDict[str(self.unitsL)]
+        
+        self.clear
+        with open(ccoFile, 'r') as f:
+            token = f.readline()
+            token = f.readline().split() # Tree information            
+            f.readline() # Blank line
+            f.readline() # *Vessels
+            nVessels = int(f.readline())
+            print(f'The tree has {nVessels} vessels.')
+
+            edges = dict()            
+            for i in range(nVessels):
+                vessel = f.readline().split()
+                vesselId = int(vessel[0])
+                x1,x2 = np.array([float(x) for x in vessel[1:4]])*lengthConversion, np.array([float(x) for x in vessel[4:7]])*lengthConversion
+                r = float(vessel[12]) * lengthConversion
+                l = np.linalg.norm(x1-x2) * lengthConversion
+                edges[vesselId] = {'radius':r, 'length':l,'start':x1,'end':x2,'stage':vessel[-1]}
+            f.readline() # Blank line
+            f.readline() # *Connectivity
+
+            rootId = None
+            for i in range(nVessels):                
+                vessel = f.readline().split()
+                vesselId = int(vessel[0])
+                edges[vesselId]['parent'] = int(vessel[1])
+                if int(vessel[1])==-1:
+                    rootId = vesselId
+                edges[vesselId]['descendants'] = [int(descendant) for descendant in vessel[2:]]
+            vesselId, node, nodep = rootId, 0, 1 # Start with the root            
+            
+            def AddVesselToGraph(vesselId, startNode):
+                endNode = self.number_of_nodes()
+                vessel = edges.pop(vesselId)
+                self.add_node(endNode, position=vessel['end'], stage=int(vessel.pop('stage')))
+                self.add_edge(startNode, endNode, radius=vessel['radius'], length=vessel['length'], hd=vessel.pop('hd',0.45))
+
+                for descendant in vessel['descendants']:
+                    AddVesselToGraph(descendant, endNode)
+
+            self.add_node(0, position=edges[rootId]['start'], stage=-2)
+            AddVesselToGraph(rootId, 0)                
+            nodesToRemove = [n for n,stage in self.nodes(data='stage')
+                            if stage==-2 ]
+            for node in nodesToRemove:
+                self.remove_node(node)
+            #nx.convert_node_labels_to_integers(self)
+
+    def VesselsToVTK(self, VTKFileName):
+        # Create list of points (nodes)
+        points = vtk.vtkPoints()
+        points.SetNumberOfPoints(self.nNodes)
+        for n, data in self.nodes(data=True):
+            points.SetPoint(n, data['position'])
+
+        # Create list of lines (vessels)
+        # with list of radius
+        lines = vtk.vtkCellArray()
+        radius = vtk.vtkDoubleArray()
+        flow = vtk.vtkDoubleArray()
+        PO2  = vtk.vtkDoubleArray()
+        
+        flow.SetName(f'flow [{(self.unitsL**3)/self.unitsT}]')
+        radius.SetName(f"radius [{self.unitsL}]")
+        PO2.SetName(f"PO2 [mmHg]")
+        
+        for n1, n2, data in tqdm(self.edges(data=True), desc=f"Writing vessel data to {VTKFileName}"):
+            line = vtk.vtkLine()
+            line.GetPointIds().SetId(0, n1)
+            line.GetPointIds().SetId(1, n2)
+            lines.InsertNextCell(line)
+            radius.InsertNextValue(data['radius'])
+            flow.InsertNextValue(data.get('flow', 0.0))
+
+        for n, p in (self.nodes(data='PO2')):
+            PO2.InsertNextValue(p)
+
+        # Create the polydata
+        polydata = vtk.vtkPolyData()
+        polydata.SetPoints(points)
+        polydata.GetCellData().AddArray(radius)
+        polydata.GetCellData().AddArray(flow)
+        polydata.GetPointData().AddArray(PO2)
+        polydata.SetLines(lines)
+
+        # Write the polydata
+        writer = vtk.vtkXMLPolyDataWriter()
+        writer.SetFileName(VTKFileName)
+        writer.SetInputData(polydata)
+        writer.SetDataModeToBinary()
+        writer.Update()
+        writer.Write()
+
+        return
+
+    def LabelMesh(self, mesh : UniformGrid, endotheliumThickness : float, repartition=True):
+        """Labels the tissue surrounding the vessels. Spliting of the vessel segments is performed prior to labelling unless specified otherwise.
+
+        Parameters
+        ----------
+        endotheliumThickness : float
+            Thickness of the endothelium.
+        repartition : bool, default=True
+            Set to 'True' to split vessels to fit mesh size.
+        returnIntravascularConnectivity : bool, default=False
+            If 'True', returns the connectivity matrix for the cells
+            of the mesh labelled as intravascular.
+        
+        Returns
+        -------
+        NodesToEndothelialCells : scipy.sparse_array
+            The connectivity matrix of vascular nodes to endothelial cells.
+        NodesToVascularCells : scipy.sparse_array
+            The connectivity matrix of vascular nodes to vascular cells.
+        VascularCellsToNodes : scipy.sparse_array
+            The connectivity matrix of vascular cells to vascular nodes.
+        """
+        
+
+        if repartition:
+            self.Repartition(mesh, maxDist=1) # Split the vessels to the size of the mesh
+
+        mesh.labels.EmptyMatrix()
+        self.w = endotheliumThickness
+
+        # The empty connectivity matrix
+        def _LabelSerial(edge, _C2v, _C4, _I4):
+
+            n1,n2,data = edge
+            
+            p1, p2 = self.nodes[n1]['position'], self.nodes[n2]['position']                    
+            
+            r,l = data['radius'], data['length']
+            vectorDirection = (p1-p2)/l # Unit vector (direction)
+
+            # l_new, l_old = np.linalg.norm(p1-p2), l
+            # if  np.isclose(l_new, l_old):
+            #     print(f"The length stored in the graph's edge data is incorrect: {l_old=} {l_new=} for vessel {(n1,n2)=}: {self.nodes[n1]=}, {self.nodes[n2]=}.")
+            P = np.outer(vectorDirection, vectorDirection) # Matrix of the orthogonal projection onto the vessel axis
+            O = np.identity(3)-P                           # O*y = y-P*y is orthogonal to the axis
+
+            ## Find the bounding box
+            # To ensure full enclosure of the vessel, the bounding box should
+            # bound the vessel extended by its radius in each direction
+            p1, p2 = p1 - r * vectorDirection, p2 + r * vectorDirection  
+            cellMin, cellMax = mesh._BoundingBoxOfVessel(p1, p2, r)
+
+            # Iterate through the cells within the bounding box
+            for cellId in ((x,y,z) for x in range(cellMin[0], cellMax[0]+1)
+                                   for y in range(cellMin[1], cellMax[1]+1)
+                                   for z in range(cellMin[2], cellMax[2]+1)):
+                
+                # if any([i>j or i<0 for i,j in zip(cellId, mesh.nCells)]):
+                #     continue
+                # print(cellId, mesh.nCells, [i>j or i<0 for i,j in zip(cellId, mesh.nCells)])
+                # Assign new label
+                HasUpdatedValue, newLabel = self._LabelCellWithCylinder(mesh, O, p1, p2, r, cellId, endotheliumThickness)
+                # Add to connectivity matrix if the cell label changed from tissue to endothelial
+                if HasUpdatedValue:
+                    flatId = mesh.ToFlatIndexFrom3D(cellId)
+                    if newLabel==1:
+                        _C4[flatId, n2] = 1.0
+                        _I4[flatId,flatId] = 1.0
+                        _C2v.rows[flatId].clear()
+                        _C2v.data[flatId].clear()
+                    elif newLabel==2:
+                        _C2v[flatId, n2] = 1.0
+                        
+    
+        C2v = sp.lil_matrix((mesh.nVol, self.nNodes))
+        C4  = sp.lil_matrix((mesh.nVol, self.nNodes))
+        I4  = sp.lil_matrix((mesh.nVol,mesh.nVol))
+
+        for edge in self.edges(data=True):
+
+            n1,n2, data = edge
+            p1, p2 = self.nodes[n1]['position'], self.nodes[n2]['position']
+            d = (p1-p2)/data['length']
+            for t in np.linspace(-mesh.hmax/data['length'], mesh.hmax/data['length']+1, endpoint=True, num=10):
+                try:
+                    cellId = mesh.PointToCell(p1 + t*data['length']*d)
+                    HasUpdated = mesh.SetLabelOfCell(1, cellId)        
+                    if HasUpdated:
+                        flatId = mesh.ToFlatIndexFrom3D(cellId)
+                        C4[flatId, n2] = 1.0
+                        I4[flatId,flatId] = 1.0
+                except ValueError:
+                    pass
+
+        for edge in tqdm((edge for edge in self.edges(data=True)), total=self.nVessels, desc="Labelling in progress"):
+            _LabelSerial(edge, C2v,C4,I4)
+
+        # NodesToEndothelialCells = NodesToEndothelialCells.T
+        # for cellId, label in zip(list(mesh.labels.elements.keys()), list(mesh.labels.elements.values())):
+        #     if label==1:
+        #         node = VascularCellsToNodes[mesh.ToFlatIndexFrom3D(cellId)].rows[0]
+        #         if len(node)>1:
+        #             for n in node[1:]:
+        #                 VascularCellsToNodes[mesh.ToFlatIndexFrom3D(cellId), n] = 0
+        #             node = node[0]
+
+        #         for i,n in ((k,m) for k in range(3) for m in (-1,1)):
+        #             neighbourId = list(cellId)
+        #             neighbourId[i] += n
+        #             neighbourId = tuple(neighbourId)
+
+        #             if any([i>j or i<0 for i,j in zip(neighbourId, mesh.nCells)]):  # Check if the neighbour is in the grid
+        #                 if mesh.labels[neighbourId]==0:
+        #                     # Update the endothelial cells' connectivity matrix
+        #                     NodesToEndothelialCells[node, self.nNodes + mesh.ToFlatIndexFrom3D(neighbourId)] = 1.0
+        #                     HasUpdated = mesh.SetLabelOfCell(2, neighbourId) # A vascular cell should be surrounded by vascular cells or endothelial cells
+        #                     # Sanity check
+        #                     assert HasUpdated, f"The cell {neighbourId} has not been updated"
+
+        return C2v.tocsr(), C4.tocsr(), I4.tocsr()
+    
+    def _LabelCellWithCylinder(self, mesh, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
+                               cellId : tuple, endotheliumThickness : float):
+        """
+        Labels a cell within the bounding box of a cylinder.
+        The new label is 0 for tissue, 1 for intravascular and 2 for endothelium.
+        Parameters:
+        -----------
+            O : numpy.ndarray
+                (I-P) with P the projection matrix onto the vessel's axis (centerline)
+            p1, p2 : numpy.ndarray
+                the end points of the vessel.
+            r : float
+                the vessel's radius.
+            cellId : tuple
+                the indices i,j,k locating the cell in the mesh.
+            endotheliumThickness : float
+                the thickness of the endothelial layer.
+        """
+        # If we have already labeled it, don't redo it.                    
+        cellCenter = mesh.CellCenter(cellId)
+        d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center           
+        
+        if (d < r-endotheliumThickness/2.0):
+            newLabel = 1
+        elif (d < r - endotheliumThickness/2.0 + 0.87*mesh.hmax): # 0.87~=sqrt(3)/2 which is the max distance to the center of the unit cube
+        #elif (d<r+endotheliumThickness/2.0):
+            newLabel = 2
+        else:
+            newLabel = 0
+
+        # labelDict = {0:'tissue', 1:'vessel', 2:'endothelium'} 
+        updatedValue = mesh.SetLabelOfCell(newLabel, cellId)        
+        return updatedValue, newLabel
+    
+    def Viscosity(self, radius, hd=0.45, Type='Pries'):
+        '''
+        Radius should be in microns.
+        '''
+        d = (2 * radius * self.unitsL).to_value(u.um)
+        
+        if Type=='Constant':
+            return 3.6 # cP
+        if Type=='Haynes':
+            # Both muInf and delta are taken from Takahashi's model
+            muInf = 1.09*np.exp(0.024*hd)
+            delta = 4.29
+            return muInf/( (1+delta/(d/2.0))**2 )
+        else:
+            mu045 = 220*np.exp(-1.3*d) + 3.2 - 2.44*np.exp(-0.06*d*0.645)
+            C = (0.8 + np.exp(-0.075*d))*(-1+(1+10**-11*(d)**12)**-1)+(1+10**-11*(d)**12)**-1
+            return ( 1 + (mu045-1)*((1-hd)**C-1)/((1-0.45)**C-1) )
+    
+    def __str__(self):
+        return f"""
+        Vessels:
+            Number of nodes: {self.nNodes}
+            Number of segments: {self.nVessels()}
+            Length scale: {self.unitsL}
+            Time scale: {self.unitsT}
+            Bounding box: {[bb.tolist() for bb in self.BoundingBox()]}
+            Maximum/Minimum radii: {self.maxRad}/{self.minRad}
+        """
+
 class VascularNetwork(object):
     """A class storing a vascular network given in a .cco format.
     TODO: add different input files than .cco.
     Attributes:
     -----------
-    G : networkx.DiGraph
-       the directed graph of the network, contains location, size and flow (if yet computed) information.
-    mesh : Mesh.UniformGrid
-       a mesh of the tissue surrounding the vasculature.
+    nNodes
+        Returns the number of nodes in the network.
+    nVessels
+        Returns the number of vessels in the network.
     w : float
        Vessel wall thickness.
     Flow_matrix : numpy.ndarray
@@ -53,10 +608,6 @@ class VascularNetwork(object):
         Solves blood flow with the boundary conditions set.
     MakeMc()
         Returns the O2 convection in vessels subsystem.
-    nNodes()
-        Returns the number of nodes in the network.
-    nVessels()
-        Returns the number of vessels in the network.
     BoundingBox()
         Return the bounding box of the network.
     PlotGraph(Graph)
@@ -419,7 +970,6 @@ class VascularNetwork(object):
         
         return (edge[0], newNode), (newNode, edge[1])
         
-        
 
     def GetVesselData(self, keys : List[str], returnAList : bool = False):
         dataDict = dict()
@@ -513,7 +1063,7 @@ class VascularNetwork(object):
         dp  = self.C.dot(p)
 
         # assert f.size==self.nVessels(), f"Segment flow vector has wrong size. Expected {self.nVessels()} and got {f.size}."
-        # assert p.size==self.nPoints, f"Nodal pressure vector has wrong size. Expected {self.nPoints} and got {p.size}."
+        # assert p.size==self.nNodes, f"Nodal pressure vector has wrong size. Expected {self.nNodes} and got {p.size}."
 
 
         # Compute error of the solver
