@@ -192,7 +192,7 @@ class UniformGrid(object):
         Returns False if labels[cellId] has not been updated.
         '''
         if np.any(np.array(cellId) < 0) or np.any(np.array(cellId) > np.array(self.nCells)-1):
-            print(f"Ignoring call to label cell {cellId} because out of bound for mesh.")
+            # print(f"Ignoring call to label cell {cellId} because out of bound for mesh.")
             return False
         oldLabel = self.labels.readValue(cellId)
         updateValue = False
@@ -242,7 +242,7 @@ class UniformGrid(object):
         # The other method seems to return lower indices? May be a rounding problem.
         xarr = np.array(X).reshape((3,))
         if (np.any(xarr < self.origin) or np.any(xarr > self.origin + self.dimensions)):
-            raise ValueError(f"Point {X.tolist()} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
+            raise ValueError(f"PointToCell1 returned: Point {X.tolist()} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
         
         xCentered = xarr - self.origin
         cell = np.floor(np.divide(xCentered, self.spacing)).astype(int)
@@ -253,7 +253,7 @@ class UniformGrid(object):
         xarr = np.divide(np.array(X).reshape((3,)) - self.origin, self.dimensions) 
 
         if (np.any(xarr < 0) or np.any(xarr > 1)):
-            raise ValueError(f"Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
+            raise ValueError(f"PointToCell returned: Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
 
         xVoxelSpace = np.multiply(xarr, self.nCells) # Project onto voxel space
         return np.floor(xVoxelSpace).astype(int)
@@ -330,6 +330,31 @@ class UniformGrid(object):
     def MakePoissonWithChoroid(self, D):
         nx,ny,nz = self.nCells
         dx,dy,dz = self.spacing
+        n = nx*ny*nz
+
+        # M = sp.dia_matrix([D/dz/dz, D/dy/dy, D/dx/dx, 0, D/dx/dx, D/dy/dy, D/dz/dz], 
+        #                   [-nx*ny,-nx, -1,0,1,nx,nx*ny], 
+        #                   shape=(n,n))
+        # diagm = M.data[M.offsets==-1].reshape(self.nCells) # First lower diag
+        # diagp = M.data[M.offsets==1].reshape(self.nCells) # First upper diag  
+        # assert not diagm.flag['OWNDATA'] is None, "We made a copy here of diagm."
+        # assert not diagp.flag['OWNDATA'] is None, "We made a copy here of diagp."
+        # diagm[0,:,:] = diagp[-1,:,:] = 0.0
+
+        # diagm = M.data[M.offsets==-nx].reshape(self.nCells) # First lower diag
+        # diagp = M.data[M.offsets==nx].reshape(self.nCells) # First upper diag  
+        # assert not diagm.flag['OWNDATA'] is None, "We made a copy here of diagm."
+        # assert not diagp.flag['OWNDATA'] is None, "We made a copy here of diagp."
+        # diagm[:,0,:] = diagp[:,-1,:] = 0.0  
+        
+        # diagm = M.data[M.offsets==-1].reshape(self.nCells) # First lower diag
+        # diagp = M.data[M.offsets==1].reshape(self.nCells) # First upper diag  
+        # assert not diagm.flag['OWNDATA'] is None, "We made a copy here of diagm."
+        # assert not diagp.flag['OWNDATA'] is None, "We made a copy here of diagp."
+        # diagm[:,:,0] = diagp[:,:,-1] = 0.0  
+        
+        # print(M.data.shape)
+        
 
         coeffs = [D/dz/dz, D/dy/dy, D/dx/dx, # Lower diagonals
                   0,        # Main diagonal, coeff is set below

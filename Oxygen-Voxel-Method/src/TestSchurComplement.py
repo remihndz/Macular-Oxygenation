@@ -8,6 +8,11 @@ import scipy.sparse.linalg as spl
 import numpy as np
 import time
 
+import cupyx.scipy.sparse.linalg as cpssl
+import cupy as cp
+import cupyx.scipy.sparse as cpss
+
+rtol = 1e-4
 
 G = DAG({'length':'mm', 'time':'s'})
 G.CreateGraph('sim_19.cco')
@@ -17,7 +22,8 @@ origin = u.Quantity(bb[0], 'mm')
 dimensions = u.Quantity(abs(bb[1]-bb[0]), 'mm')
 dimensions += 2*maxRad * u.mm
 origin -=  maxRad * u.mm
-T = TissueNew(G, origin=origin.value, dimensions=dimensions.value, nCells=[900,800,66])
+T = TissueNew(G, origin=origin.value, dimensions=dimensions.value, nCells=np.array([100,100,50])*1)
+
 # G.Repartition(T)
 #G.LabelMesh(T, endotheliumThickness=0.01)
 #T.ToVTK('TestNewLabelling.vtk')
@@ -27,7 +33,6 @@ G.SetLinearSystem({'pressure':50}, {'pressure':25})
 f,p,dp = G.SolveFlow()
 T._MakeConvection(1e-4)
 T._MakeReactionDiffusion(1e-4, 1e-6)
-
 
 #### Full system solving
 A = sp.bmat([[T.M-T.A, T.E], [T.G, T.B]], format='csr', dtype=float)
@@ -47,10 +52,10 @@ class gmres_counter(object):
 t = time.time()
 # P = spl.splu(A)
 # M = spl.LinearOperator((n,n), P.solve)
-# M = sp.spdiags(1./A.diagonal(), 0, n,n)
-# x,code = spl.gmres(A,b,M=M, callback=gmres_counter(), restart=20, maxiter=10000,tol=1e-5)
-# if code!=0:
-#     print("gmres did not converge in", time.time()-t, "s.")
+M = sp.spdiags(1./A.diagonal(), 0, n,n)
+x,code = spl.gmres(A,b,M=M, callback=gmres_counter(), restart=20, maxiter=1500,tol=rtol)
+if code!=0:
+    print("gmres did not converge in", time.time()-t, "s.")
 
 #### Schur complement solving
 A = T.M - T.A
@@ -65,18 +70,16 @@ Sc = spl.LinearOperator((T.nVol,T.nVol), Sc_func)
 bc = make_bc(b[T.nNodes:], b[:T.nNodes])
 
 t = time.time()
-x,code = spl.gmres(Sc, bc, restart=10, callback=gmres_counter(),maxiter=1500)
+x,code = spl.gmres(Sc, bc, restart=10, callback=gmres_counter(),maxiter=1500, tol=rtol)
 print("Time to solve without preconditioner:", time.time()-t, "s.")
 
 # T.ToVTK('SchurCPU.vtk', x)
 
 ## Schurr complement on gpu
-import cupyx.scipy.sparse.linalg as cpssl
-import cupy as cp
-import cupyx.scipy.sparse as cpss
 
-del A
-del Sc
+
+# del A
+# del Sc
 
 b_gpu = cp.array(b)
 # del b
@@ -97,7 +100,7 @@ bc_gpu = make_bc_gpu(b_gpu[T.nNodes:], b_gpu[:T.nNodes])
 Sc_gpu = cpssl.LinearOperator((T.nVol, T.nVol), Sc_func_gpu)
 
 t = time.time()
-x, code = cpssl.gmres(Sc_gpu, bc_gpu, restart=10, callback=gmres_counter())
+x, code = cpssl.gmres(Sc_gpu, bc_gpu, restart=3, callback=gmres_counter(), maxiter=1500, tol=rtol)
 print("Time to solve without preconditioner, on GPU:", time.time()-t, "s.")
 
 T.ToVTK('SchurGPU.vtk', x)

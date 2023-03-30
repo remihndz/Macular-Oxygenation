@@ -213,7 +213,10 @@ class DAG(nx.DiGraph):
             if stage1<-1 or stage2<-1: # skip that vessel if it is part of the 'backbone'
                 pass
             
-            cell1, cell2 = mesh.PointToCell(x1), mesh.PointToCell(x2)
+            try:
+                cell1, cell2 = mesh.PointToCell(x1), mesh.PointToCell(x2)
+            except ValueError: # Skip that vessel, it is out of the domain
+                continue 
             
             if mesh.Dist(cell1, cell2) > maxDist:
                 # print(f"edge {e} added to the list of vessels to split.")
@@ -337,6 +340,12 @@ class DAG(nx.DiGraph):
                             if stage==-2 ]
             for node in nodesToRemove:
                 self.remove_node(node)
+
+        tmpLabels, newLabels = {}, {}
+        for i,n in enumerate(nx.topological_sort(self)):
+            tmpLabels[n]=-n
+            newLabels[-n]=i
+        nx.relabel_nodes(self, tmpLabels, copy=False)
             #nx.convert_node_labels_to_integers(self)
 
     def VesselsToVTK(self, VTKFileName):
@@ -482,29 +491,6 @@ class DAG(nx.DiGraph):
 
         for edge in tqdm((edge for edge in self.edges(data=True)), total=self.nVessels, desc="Labelling in progress"):
             _LabelSerial(edge, C2v,C4,I4)
-
-        # NodesToEndothelialCells = NodesToEndothelialCells.T
-        # for cellId, label in zip(list(mesh.labels.elements.keys()), list(mesh.labels.elements.values())):
-        #     if label==1:
-        #         node = VascularCellsToNodes[mesh.ToFlatIndexFrom3D(cellId)].rows[0]
-        #         if len(node)>1:
-        #             for n in node[1:]:
-        #                 VascularCellsToNodes[mesh.ToFlatIndexFrom3D(cellId), n] = 0
-        #             node = node[0]
-
-        #         for i,n in ((k,m) for k in range(3) for m in (-1,1)):
-        #             neighbourId = list(cellId)
-        #             neighbourId[i] += n
-        #             neighbourId = tuple(neighbourId)
-
-        #             if any([i>j or i<0 for i,j in zip(neighbourId, mesh.nCells)]):  # Check if the neighbour is in the grid
-        #                 if mesh.labels[neighbourId]==0:
-        #                     # Update the endothelial cells' connectivity matrix
-        #                     NodesToEndothelialCells[node, self.nNodes + mesh.ToFlatIndexFrom3D(neighbourId)] = 1.0
-        #                     HasUpdated = mesh.SetLabelOfCell(2, neighbourId) # A vascular cell should be surrounded by vascular cells or endothelial cells
-        #                     # Sanity check
-        #                     assert HasUpdated, f"The cell {neighbourId} has not been updated"
-
         return C2v.tocsr(), C4.tocsr(), I4.tocsr()
     
     def _LabelCellWithCylinder(self, mesh, O : np.ndarray, p1 : np.ndarray, p2 : np.ndarray, r : float,
@@ -525,8 +511,11 @@ class DAG(nx.DiGraph):
             endotheliumThickness : float
                 the thickness of the endothelial layer.
         """
-        # If we have already labeled it, don't redo it.                    
-        cellCenter = mesh.CellCenter(cellId)
+        # If we have already labeled it, don't redo it. 
+        try:                   
+            cellCenter = mesh.CellCenter(cellId)
+        except ValueError: # The cell is not in the cuboid (vessel outside domain, thus ignored)
+            return False, 0 
         d = np.linalg.norm( O.dot(p1-cellCenter) ) # The radial distance between the vessel axis and the cell center           
         
         if (d < r-endotheliumThickness/2.0):
@@ -762,7 +751,10 @@ class VascularNetwork(object):
                 p1, p2 = self.G.nodes[n1]['position'], self.G.nodes[n2]['position']
                 d = (p1-p2)/data['length']
                 for t in np.linspace(-self.mesh.hmax/data['length'], self.mesh.hmax/data['length']+1, endpoint=True, num=10):
-                    cellId = self.mesh.PointToCell(p1 + t*data['length']*d)
+                    try:
+                        cellId = self.mesh.PointToCell(p1 + t*data['length']*d)
+                    except ValueError:
+                        continue
                     HasUpdated = self.mesh.SetLabelOfCell(1, cellId)        
                     if HasUpdated:
                         VascularCellsToNodes[self.mesh.ToFlatIndexFrom3D(cellId), n2] = 1

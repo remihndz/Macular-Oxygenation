@@ -68,13 +68,18 @@ class TissueNew(UniformGrid):
         else:
             raise ValueError("'vessels' must be a .CCO file or an instance of DAG class.")    
         
+        # dims = np.zeros(3)
+        # if not dimensions:
         bb = self.vessels.BoundingBox()
         maxRad = max([e[-1] for e in self.vessels.edges.data('radius')])
         orig = bb[0]-maxRad
         dims = abs(bb[1]-bb[0])+2.0*maxRad
-
-        super().__init__(np.maximum(dimensions, dims), np.minimum(origin, orig)
+        
+        # super().__init__(np.maximum(dimensions, dims), np.minimum(origin, orig)  # Does taking minimum orig and max dims work? 
+        #                  , nCells, spacing, units=self.unitsL)
+        super().__init__(dims, orig 
                          , nCells, spacing, units=self.unitsL)
+
         
         self.C2v, self.C4, self.I4 = self.vessels.LabelMesh(self, endotheliumThickness = self.w)
         self.C2t = np.zeros(self.nVol)
@@ -283,6 +288,9 @@ class TissueWithChoroid(TissueNew):
     def __init__(self, vessels: Union[DAG, str], dimensions=..., origin=..., nCells=..., spacing=None, units: Dict[str, str] = { 'length': 'mm','time': 's' }, w: float = 1 * u.um):
         super().__init__(vessels, dimensions, origin, nCells, spacing, units, w)
     
+
+    def _MakeReactionDiffusion(self, D : float, kt : float,
+                               saveIn : Optional[str] = None, method=2):
         """Assembles the Reaction-Diffusion matrix for tissue cells.
 
         Parameters
