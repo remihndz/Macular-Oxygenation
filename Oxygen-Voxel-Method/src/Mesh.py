@@ -252,8 +252,8 @@ class UniformGrid(object):
         # Center and normalize
         xarr = np.divide(np.array(X).reshape((3,)) - self.origin, self.dimensions) 
 
-        if (np.any(xarr < 0) or np.any(xarr > 1)):
-            raise ValueError(f"PointToCell returned: Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
+        # if (np.any(xarr < 0) or np.any(xarr > 1)):
+        #     raise ValueError(f"PointToCell returned: Point {X} out of bounds for the cuboid between {self.origin} and {self.origin + self.dimensions}.")
 
         xVoxelSpace = np.multiply(xarr, self.nCells) # Project onto voxel space
         return np.floor(xVoxelSpace).astype(int)
