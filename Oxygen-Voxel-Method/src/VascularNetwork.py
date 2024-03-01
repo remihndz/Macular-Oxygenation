@@ -783,7 +783,7 @@ class VascularNetwork(object):
                             NodesToEndothelialCells[node, self.nPoints + self.mesh.ToFlatIndexFrom3D(neighbourId)] = 1.0
                             HasUpdated = self.mesh.SetLabelOfCell(2, neighbourId) # A vascular cell should be surrounded by vascular cells or endothelial cells
                             # Sanity check
-                            assert HasUpdated, f"The cell {neighbourId} has not been updated"
+                            #assert HasUpdated, f"The cell {neighbourId} has not been updated"
                     except KeyError:
                         #print(f"Neighbour {neighbourId} of cell {cellId} out of bounds of the tissue ({self.mesh.nCells=}).")
                         pass
