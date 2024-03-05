@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 # import numba
+import warnings
 
 import scipy.sparse as sp
 import numpy as np
@@ -370,45 +371,68 @@ class ControlVolumes(object):
         # endo = self.VAG.new_vertex_property("python::object", val=set())
         # vasc = self.VAG.new_vertex_property("python::object", val=set())
 
-        G = self.VAG.copy()
+        G = self.VAG.copy() # Coupling graph
+        vascularVertices = np.array(list(G.iter_vertices()))
+        nVAG = max(max(vascularVertices), len(vascularVertices))
+
         G.clear_edges()
-        G.shrink_to_fit()
-        Voxels = np.fromiter(G.add_vertex(self.grid.size), dtype=int)
+        for name in list(G.vp): # Remove unnecessary properties that were copied
+            del G.vp[name]
+            try: # Check if they are still in the original graph
+                _ = self.VAG.vp[name] 
+            except KeyError:
+                warnings.warn("Some vertex property maps have been deleted from the vascular graph.")
+        G.shrink_to_fit() # reduce memory usage to what's needed only
+        
+        # Voxels = np.fromiter(G.add_vertex(self.grid.size), dtype=int) ## add_vertex scales in O(n) which makes it very slow for this. We don't need all the voxels in the graph.
         eType = G.new_edge_property("bool") # 0 for vascular, 1 for endothelial connections
         G.ep['eType'] = eType
 
+        def Prune():
+            Voxels = G.get_vertices()
+            Voxels = np.setxor1d(Voxels, vascularVertices) # Should get rid of the vascular vertices
+            Voxels = Voxels[G.get_in_degrees(Voxels)>0]        
+            G.set_fast_edge_removal(fast=True) # This requires a data structure of size O(E) to be kept
+            edgesToKeep = []
+            for v in tqdm(Voxels, desc='Pruning the coupling graph'):
+                edges = G.get_all_edges(v, eprops=[eType])
+                endothelialEdges = edges[:,-1]==1
+                endothelialEdges = edges[endothelialEdges]
+                if len(endothelialEdges): # If any endothelial edge
+                    edge = endothelialEdges[0]
+                    edgesToKeep.append(edge) # Edge to keep
+                    G.clear_vertex(v)
+            G.add_edge_list(edgesToKeep, eprops=[G.ep['eType']])
+            del Voxels
+            G.shrink_to_fit() # reduce memory usage to what's needed only
+
+        
         for e in tqdm(self.VAG.iter_edges(), 
                         total=self.VAG.num_edges(), 
-                        desc="Labelling...", unit="edge"): # Loop through the vessels in the FOV.
+                        desc="Labelling...", unit="edge"): # Loop through the vessels in the FOV.            
             for u, voxelsSet, t in zip((e[0],e[0], e[1], e[1]), LabelVessel(e,w), (1,0,1,0)):
-                G.add_edge_list(((u, v, t) for v in voxelsSet), eprops=[eType])
-            # print(f"{G.num_edges()=}, {G.num_vertices()=}")
+                G.add_edge_list(((u, nVAG+v, t) for v in voxelsSet), eprops=[eType])
         del voxelsSet
 
-        edgesToKeep = []
-        Voxels = Voxels[G.get_total_degrees(Voxels)>0]
-        for v in tqdm(Voxels):
-            edges = G.get_all_edges(v, eprops=[eType])
-            if (edges[:,-1]==1).any():
-                edge = edges[edges[:,-1]==1][0]
-            else:
-                edge = edges[0]
-            edgesToKeep.append(edge)
-        # Make it an internal property
-        self.VAG.vp['endothelium'] = self.VAG.new_vertex_property("python::object", val=[])
-        self.VAG.vp['vascular']    = self.VAG.new_vertex_property("python::object", val=[])
+        # Prune the coupling graph to one endothelial connection per voxel
+        Prune()
 
-        vasc = find_edge(G, eType, 0)
-        endo = find_edge(G, eType, 1)
-        vertex_index = G.vertex_index
-        for cv, voxel in tqdm(vasc, desc="Adding vascular voxels to graph"):
-            self.VAG.vp['vascular'][cv].append(vertex_index[voxel])
-        for cv, voxel in tqdm(endo, desc="Adding endothelium voxels to graph"):
-            self.VAG.vp['endothelium'][cv].append(vertex_index[voxel])
+        ## Coupling matrices
+        endo = find_edge(G, G.ep['eType'],1)
+        nc, nt, nv = len(endo), self.grid.size, self._vessels.num_vertices() 
 
-        # self.VAG.vp['endothelium'] = endo
-        # self.VAG.vp['vascular']    = vasc
-        return G
+        C2v = sp.dok_matrix((nc,nv))
+        C2t = sp.dok_matrix((nc,nt))
+        N   = np.zeros(nv, dtype=int) # Number of connections to each control volumes. 
+                            # Should be the same as C2v.sum(1)
+        for i, e in enumerate(endo):
+            u,v = int(e.source()), int(e.target())-nVAG # u: a control volume, v: a voxel
+            C2v[i, u] = 1 
+            C2t[i, v] = 1 
+            N[u]+=1
+        C2v, C2t = C2v.tocsr(), C2t.tocsr()
+        del endo, G
+        return C2v.tocsr(), C2t.tocsr(), N
 
     def bar(self): # To profile the time for labelling.
         profile.runctx('self.LabelMesh()', globals(), locals())
@@ -551,8 +575,7 @@ class gmres_counter(object):
     def __call__(self, rk=None):
         self.niter += 1
         if self.niter%self._disp==0:
-            if isinstance(rk, np.ndarray):
-                rk = rk.get()
+            rk = np.mean(rk)
             self.rks.append(rk)
             print('iter %3i\trk = %s' % (self.niter, str(rk)))
 
@@ -564,7 +587,7 @@ class gmres_counter(object):
         plt.plot(self._disp * (1+np.arange(len(self.rks))), self.rks)
         plt.xlabel("Number of iterations")
         plt.ylabel("Residual (relative?)")
-        plt.title(f"Solving time: {t}min")
+        plt.title(f"Solving time: {t:.4f}min")
         plt.show()
 
 
