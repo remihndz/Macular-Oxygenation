@@ -15,14 +15,18 @@ def ConvectionMatrices(CV):
                         shape=(CV._vessels.num_vertices(), CV._vessels.num_vertices()))
     Dout = sp.dia_matrix(((CV._vessels.get_out_degrees(CV._vessels.get_vertices())==0).astype(int), 0),
                         shape=(CV._vessels.num_vertices(), CV._vessels.num_vertices()))    
-    q = CV._vessels.ep['q']
-    l = CV._vessels.ep['length']
-    L = sp.dia_matrix((1.0/l.a, 0), shape=2*[CV._vessels.num_edges()])
-    Q = sp.dia_matrix((q.a * (l.a/2), 0), shape=2*[CV._vessels.num_edges()])
-    Min  = Din @ C1.T @ Q @ (PositivePart(-C1))
+    
+    v = CV._vessels.ep['q'].a / (np.pi*(CV._vessels.ep['radius'].a**2)) # Flow velocity m/s
+    l = CV._vessels.ep['length'].a # Vessel length m
+    vol = np.pi*(CV._vessels.ep['radius'].a**2) * l # Volume of the cylinder m^3
+
+    L = sp.dia_matrix((vol/(0.5*l), 0), shape=2*[CV._vessels.num_edges()]) # From the discretization of the divergence we get 1./l
+                                                                           # To convert concentrations to moles, we multiply by volume of cylinder, assuming the cylinder is full of solute (blood)
+    V = sp.dia_matrix((v, 0), shape=2*[CV._vessels.num_edges()]) # Flow velocity
+    # Min  = Din @ C1.T @ Q @ (PositivePart(-C1))
     Min = Din
-    MOut = Dout @ C1.T @ Q @ PositivePart(C1)
-    M = C1.T@(PositivePart(L@Q)@PositivePart(C1) - PositivePart(-L@Q)@PositivePart(-C1))
+    M = C1.T@(PositivePart(L@V)@PositivePart(C1) - PositivePart(-L@V)@PositivePart(-C1))
+    # MOut = Dout @ C1.T @ Q @ PositivePart(C1)
     # M -= MOut
     return M.T.tocsr(), Min.T.tocsr(), Din.tocsr()
 
@@ -71,66 +75,69 @@ def MakeCouplingMatrices(CV:ControlVolumes, h_v:float):
     - scipy sparse matrices C2v, C2t and S.
     """
     C2v, C2t, N = CV.LabelMesh(h_v)
+    S = MakeSurfaceScaling(CV, N)
+    assert S.shape[0]==C2v.shape[0], "Dimension mismatch between S and C2v. {}!={}".format(S.shape, C2v.shape)
+    return C2v, C2t, S
+
+def MakeSurfaceScaling(CV, N):
     C1 = incidence(CV._vessels)
-    S = np.pi*CV._vessels.ep['radius'].a*(CV._vessels.ep['length'].a/2.0) 
-    S = abs(C1)@S # Scale the exchange rates by the surface area of the control volume
-    
-    nc = C2v.shape[0]
+    S = 2*np.pi*CV._vessels.ep['radius'].a*(CV._vessels.ep['length'].a) 
+    S = 0.5*abs(C1)@S # Scale the exchange rates by the surface area of the control volume (each CV is a combination of half the adjacent vessels to a node)    
+    nc = sum(N)
     S = np.multiply(1/np.where(N>0, N, np.inf), S)
     S = sp.dia_matrix(([si for si,Ni in zip(S,N) for _ in range(Ni)], 0),
                       shape=(nc,nc))
-    return C2v, C2t, S
+    return S
 
 def MakeDiffusionReaction(grid:Grid, Gamma_t:float, k_t:float):
-    # lat = lattice(grid.shape)
-    # lat.set_directed(True)
-    # C3 = incidence(lat, operator=True)
-    # print("C3, done. CPU:", psutil.virtual_memory())
-    # print("Diffusion matrix, done. CPU:", psutil.virtual_memory())
-    # D3 = spl.aslinearoperator(
-    #     sp.dia_matrix(([d!=6 for d in lat.get_total_degrees(lat.get_vertices())], 0)
-    #                    , shape=(grid.size, grid.size))
-    #     ) 
-    # I3 = spl.aslinearoperator(sp.eye(grid.size))
-    # del lat    
-    # B = (I3-D3)@(-Gamma_t * (grid.h[0]) * C3@C3.T + k_t * np.prod(grid.h) * I3) + D3
-    ijk = np.arange(grid.size).reshape(grid.shape)
-    boundaryIndices = np.flatnonzero(ijk)
-    del ijk
+    """
+    Make the discretized version of -nabla^2 + k_t from a finite volume approximation on cartesian grid.
 
-    def _D3(v):
-        y = np.zeros_like(v)
-        y[boundaryIndices] = v[boundaryIndices]
-        return y
+    ### Parameters:
+    - grid: Grid
+        The cartesian grid used for the discretization.
+    - Gamma_t: float
+        The diffusion coefficient of O2 in tissue [m^2/s]
+    - k_t: float
+        The consumption rate of O2 per volume of tissue [m^-3.s^-1] 
+    """
+    grid_shape = tuple(grid.shape)
+    N = len(grid_shape)
+    faces = [
+        (slice(None),) * i + (k,) + (slice(None),) * (N-i-1)
+        for i in range(N) for k in [0,-1]
+        ] # Slices of a 3D cube that return the faces 
+
+    def _D3(x):
+        X = x.reshape(grid_shape)
+        y = np.zeros_like(X)
+        for face in faces:
+            y[face] = X[face]
+        return y.flatten()
+
     def _I3minusD3(v):
-        v[boundaryIndices] = 0
-        return v
+        y = v.reshape(grid_shape)
+        for face in faces:
+            y[face] = 0
+        return y.flatten()
+    
     def _L(x):
-        grid_shape = tuple(grid.shape)
-        N = len(grid_shape)
         X = x.reshape(grid_shape + (-1,))
-        Y = -2 * N * X
+        Y = -k_t*np.prod(grid.h)*X # Reaction
         for i in range(N):
-            Y += np.roll(X, 1, axis=i)
-            Y += np.roll(X, -1, axis=i)
-            Y[
-                (slice(None),) * i + (0,) + (slice(None),) * (N-i-1)
-            ] += np.roll(X, 0, axis=i)[
-                (slice(None),) * i + (0,) + (slice(None),) * (N-i-1)
-                ]
-            Y[
-                (slice(None),) * i + (-1,) + (slice(None),) * (N-i-1)
-            ] += np.roll(X, 0, axis=i)[
-                (slice(None),) * i + (-1,) + (slice(None),) * (N-i-1)
-                ]
-            return Y.reshape(-1, X.shape[-1])
+            coeff = Gamma_t*grid.h[i]/np.prod(np.delete(grid.h, i))
+            Y -= 2*coeff * X
+            Y += coeff * np.roll(X, 1, axis=i)
+            Y += coeff * np.roll(X, -1, axis=i)
+        
+        return Y.reshape(-1, X.shape[-1])
     
     L  = spl.LinearOperator(shape=(grid.size, grid.size), matvec=_L)
     I3 = spl.LinearOperator(shape=L.shape, matvec=lambda v: v, matmat=lambda V:V, rmatvec=lambda v:v)
     D3 = spl.LinearOperator(shape=L.shape, matvec=_D3)
     I3minusD3 = spl.LinearOperator(shape=L.shape, matvec=_I3minusD3)
-    B = I3minusD3@(-Gamma_t * (grid.h[0]) * L + k_t * np.prod(grid.h) * I3) + D3 
-    return B, D3
+    B = I3minusD3@(-Gamma_t * L) + D3 
+    return B, D3, I3minusD3
 
 def MakeAll(
         CV:ControlVolumes, # Contains vascular graph and tissue grid

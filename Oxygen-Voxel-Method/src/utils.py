@@ -14,6 +14,7 @@ from graph_tool.util import find_edge
 from tqdm import tqdm
 import cProfile as profile
 from numpy import ma
+
 import itertools
 import time
 
@@ -326,11 +327,9 @@ class ControlVolumes(object):
         - w: float
             The endothelium thickness (in cm).
         '''
-
         p0, p1 = [self.VAG.vp['position'][n].a for n in e]
         r, l   = self.VAG.ep['radius'][e], self.VAG.ep['length'][e] 
         R = self._RotationMatrix((p1-p0)/l) # Rotation operator to the vessel axis
-
         pos, labels = self._LabelRefCapsule(r, l, w) # Return a grid with its labels on a vertical capsule
         m0 = pos[-1,:]<l/2 # The cells that should be attached to the proximal node's control volume
         pos = p0[:, np.newaxis] + R.T.dot(pos) # Transpose and translate the capsule to the real vessel's axis
@@ -344,8 +343,8 @@ class ControlVolumes(object):
         # try:
         endothelium0 = ijk[ma.masked_where(m0, labels, 0)==2]
         endothelium1 = ijk[ma.masked_where(~m0, labels, 0)==2]
-        vascular0    = ijk[ma.masked_where(m0, labels, 0)==1]
-        vascular1    = ijk[ma.masked_where(~m0, labels, 0)==1]
+        vascular0    = []#ijk[ma.masked_where(m0, labels, 0)==1]
+        vascular1    = []#ijk[ma.masked_where(~m0, labels, 0)==1]
         # except IndexError:
         #     print(ijk.shape, labels.shape, labels[np.logical_and(mask, m0)].shape, labels[np.logical_and(mask, ~m0)].shape)
         #     raise IndexError("")
@@ -366,7 +365,6 @@ class ControlVolumes(object):
         - w: float
             The endothelium thickness (in cm).
         '''
-
         LabelVessel = self._LabelAroundVessel
         # endo = self.VAG.new_vertex_property("python::object", val=set())
         # vasc = self.VAG.new_vertex_property("python::object", val=set())
@@ -388,7 +386,7 @@ class ControlVolumes(object):
         eType = G.new_edge_property("bool") # 0 for vascular, 1 for endothelial connections
         G.ep['eType'] = eType
 
-        def Prune():
+        def Prune(G):
             Voxels = G.get_vertices()
             Voxels = np.setxor1d(Voxels, vascularVertices) # Should get rid of the vascular vertices
             Voxels = Voxels[G.get_in_degrees(Voxels)>0]        
@@ -406,32 +404,37 @@ class ControlVolumes(object):
             del Voxels
             G.shrink_to_fit() # reduce memory usage to what's needed only
 
-        
         for e in tqdm(self.VAG.iter_edges(), 
                         total=self.VAG.num_edges(), 
-                        desc="Labelling...", unit="edge"): # Loop through the vessels in the FOV.            
+                        desc="Labelling...", unit="edge"): # Loop through the vessels in the FOV.
             for u, voxelsSet, t in zip((e[0],e[0], e[1], e[1]), LabelVessel(e,w), (1,0,1,0)):
                 G.add_edge_list(((u, nVAG+v, t) for v in voxelsSet), eprops=[eType])
         del voxelsSet
 
         # Prune the coupling graph to one endothelial connection per voxel
-        Prune()
+        Prune(G)
 
         ## Coupling matrices
         endo = find_edge(G, G.ep['eType'],1)
+        cvs = {int(e.source()) for e in endo} # Avoid looping twice over the same control volume by using a set
         nc, nt, nv = len(endo), self.grid.size, self._vessels.num_vertices() 
-
         C2v = sp.dok_matrix((nc,nv))
         C2t = sp.dok_matrix((nc,nt))
         N   = np.zeros(nv, dtype=int) # Number of connections to each control volumes. 
                             # Should be the same as C2v.sum(1)
-        for i, e in enumerate(endo):
-            u,v = int(e.source()), int(e.target())-nVAG # u: a control volume, v: a voxel
-            C2v[i, u] = 1 
-            C2t[i, v] = 1 
-            N[u]+=1
+
+        i = 0
+        for u,v in map(lambda cv: (cv, G.get_out_edges(cv)[:,1]), cvs):    
+            #u,v = int(e.source()), int(e.target())-nVAG # u: a control volume, v: a voxel
+            # Note, here u is an integer (the control volume #) and v is an array of integers (the voxels u is linked to)
+            v -= nVAG # Tissue vertices start at nVAG in the coupling graph but should start at 0 in the coupling matrices
+            idx = np.arange(i, i+len(v)) # len(v) new connections
+            C2v[idx, u] = 1 
+            C2t[idx, v] = 1 
+            N[u]+=len(v)
+            i += len(v)
         C2v, C2t = C2v.tocsr(), C2t.tocsr()
-        del endo, G
+        del endo
         return C2v.tocsr(), C2t.tocsr(), N
 
     def bar(self): # To profile the time for labelling.
@@ -469,7 +472,7 @@ class ControlVolumes(object):
                     self.grid.labels.get(i,0) for i in 
                         tqdm(
                             # Change the order to x change the fastest and z the slowest for paraview.
-                                np.arange(self.grid.size).reshape(self.grid.shape).ravel('F'), 
+                                np.arange(self.grid.size).reshape(self.grid.shape).ravel(), 
                             unit='labels',
                             desc=f"Writing labels to {VTKFileName}",
                             total=self.grid.size)
@@ -525,8 +528,9 @@ def AddIntermediateVertices(graph:VascularGraph, edge:list[int], num_intermediat
         graph.ep[key][newEdge] = value 
     graph.ep['length'][newEdge] = l
 
-def SplitVessels_NoReordering(graph:VascularGraph, h:list[float]):
-    edges = list(graph.iter_edges())
+def SplitVessels_NoReordering(CV:ControlVolumes, h:list[float]):
+    graph = CV._vessels.copy()
+    edges = list(CV.VAG.iter_edges())
     positions = graph.vp['position']
     num_intermediates = abs(np.array([[positions[u].a-positions[v].a] for u,v in edges]))/np.asarray(h)
     num_intermediates = np.squeeze(num_intermediates, 1).max(-1).astype(int)    
@@ -547,7 +551,7 @@ def SplitVessels(CV:ControlVolumes, h:list[float]):
     positions = graph.vp['position']
     # Estimate number of splittings necessary to have l<h
     num_intermediates = abs(np.array([[positions[u].a-positions[v].a] for u,v in edges]))/np.asarray(h) 
-    num_intermediates = np.squeeze(num_intermediates, 1).max(-1).astype(int)    
+    num_intermediates = np.squeeze(num_intermediates, 1).max(-1).astype(int) 
     for edge, num_intermediate in tqdm(zip(edges, num_intermediates), desc='Refining vascular mesh', total=len(edges), unit='edges'):
         if num_intermediate<1:
             continue
@@ -558,26 +562,30 @@ def SplitVessels(CV:ControlVolumes, h:list[float]):
     if isInverted:
         vfilter.a = np.invert(vfilter)
     vorder = graph.new_vertex_property("int")
-    for i,v in enumerate(gt.topology.topological_sort(graph)):
+    topoSort = gt.topology.topological_sort(graph)
+    for i,v in enumerate(topoSort):
         vorder[v] = i
     CV._vessels = gt.Graph(graph, directed=True, vorder=vorder)
     CV._vessels.vp['sort'] = CV._vessels.new_vertex_property("int", vorder.a)
     CV.VAG = gt.GraphView(CV._vessels, vfilt=CV._vessels.vp['vfilt'])    
     del CV._vessels.vp['vfilt'], CV.VAG.vp['vfilt']
-    return 
+    return topoSort
 
 class gmres_counter(object):
-    def __init__(self, disp=10):
+    def __init__(self, disp=10, gpu:bool=False, _print:bool=True):
         self._disp = disp
+        self._print = _print
         self.niter = 0
         self.rks = []
+        self.mean = lambda x: np.mean(x.get()) if gpu else np.mean(x)
 
     def __call__(self, rk=None):
         self.niter += 1
+        rk = self.mean(rk)
+        self.rks.append(rk)
         if self.niter%self._disp==0:
-            rk = np.mean(rk)
-            self.rks.append(rk)
-            print('iter %3i\trk = %s' % (self.niter, str(rk)))
+            if self._print:
+                print('iter %3i\trk = %s' % (self.niter, str(rk)))
 
     def __enter__(self):
         self.t1 = time.time()
@@ -588,7 +596,7 @@ class gmres_counter(object):
         plt.xlabel("Number of iterations")
         plt.ylabel("Residual (relative?)")
         plt.title(f"Solving time: {t:.4f}min")
-        plt.show()
+        # plt.show()
 
 
 def PositivePart(M):
